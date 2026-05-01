@@ -1,0 +1,66 @@
+<mujoco model="camera calibration scene">
+  <include file="panda.xml"/>
+
+  <statistic center="0.3 0 0.4" extent="1"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="120" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+      markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    
+    <!-- AprilTag 纹理 (棋盘格用于标定) -->
+    <texture type="2d" name="apriltag_texture" file="../misc/apriltag_0.png" />
+    <material name="apriltag_material" texture="apriltag_texture" />
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+    
+    <!-- ========================================== -->
+    <!-- Eye-to-Hand Camera (固定在场景中)           -->
+    <!-- ========================================== -->
+    <!-- 相机位置：斜上方看向工作空间 -->
+    <camera name="eye_to_hand" 
+            pos="0.6 0 0.8" 
+            euler="0 45 180" 
+            fovy="60" 
+            resolution="640 480"/>
+    
+    <!-- ========================================== -->
+    <!-- 固定 AprilTag 标定板                        -->
+    <!-- ========================================== -->
+    <!-- 标定板放置在工作空间中央 -->
+    <body name="apriltag_board" pos="0.4 0 0.05" quat="1 0 0 0">
+      <!-- 标定板基板 -->
+      <geom name="board_base" type="box" size="0.15 0.15 0.005" 
+            rgba="0.9 0.9 0.9 1" contype="0" conaffinity="0"/>
+      
+      <!-- AprilTag 标记 (简化为一个带纹理的平面) -->
+      <geom name="apriltag_marker" type="box" size="0.12 0.12 0.001" 
+            pos="0 0 0.006" material="apriltag_material" 
+            contype="0" conaffinity="0"/>
+      
+      <!-- 角点标记 (用于可视化) -->
+      <site name="tag_corner_0" pos="-0.12 -0.12 0.006" size="0.005" rgba="1 0 0 1" group="3"/>
+      <site name="tag_corner_1" pos="0.12 -0.12 0.006" size="0.005" rgba="0 1 0 1" group="3"/>
+      <site name="tag_corner_2" pos="0.12 0.12 0.006" size="0.005" rgba="0 0 1 1" group="3"/>
+      <site name="tag_corner_3" pos="-0.12 0.12 0.006" size="0.005" rgba="1 1 0 1" group="3"/>
+      <site name="tag_center" pos="0 0 0.006" size="0.008" rgba="0 1 0 1" group="3"/>
+    </body>
+    
+    <!-- 辅助坐标系可视化 -->
+    <body name="world_origin" pos="0 0 0">
+      <site name="origin_x" pos="0.05 0 0" size="0.005" rgba="1 0 0 0.5" group="3"/>
+      <site name="origin_y" pos="0 0.05 0" size="0.005" rgba="0 1 0 0.5" group="3"/>
+      <site name="origin_z" pos="0 0 0.05" size="0.005" rgba="0 0 1 0.5" group="3"/>
+    </body>
+  </worldbody>
+</mujoco>

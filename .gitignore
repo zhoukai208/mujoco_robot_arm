@@ -1,0 +1,11 @@
+*TXT
+# *.png
+*.pyc
+tensorboard
+pinocchio
+eigenpy
+casadi
+kdl_parser
+pinocchio_install
+*/.git
+urdf2mjcf

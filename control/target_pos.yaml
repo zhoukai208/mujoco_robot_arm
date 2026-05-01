@@ -1,0 +1,18 @@
+# 机械臂目标多点位姿列表 (单位：m / 角度deg)
+target_poses:
+  - pos: [0.5, 0.0, 0.5]    # 点1 位置(x,y,z)
+    roll: 180
+    pitch: 0
+    yaw: 0
+  - pos: [0.5, 0.2, 0.5]    # 点2 位置
+    roll: 180
+    pitch: 0
+    yaw: 0
+  - pos: [0.5, 0.2, 0.3]    # 点3 位置
+    roll: 180
+    pitch: 0
+    yaw: 45
+  - pos: [0.4, -0.1, 0.4]   # 点4 位置
+    roll: 180
+    pitch: 0
+    yaw: -30
