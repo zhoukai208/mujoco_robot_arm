@@ -25,6 +25,7 @@ class ArmBaseViewer(CustomViewer):
         # 末端
         self.flange_name = "link7"
         self.flange_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.flange_name)
+        self.ee_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ee_center_body") 
 
         # 运动学
         self.kinematics = PandaKinematics()

@@ -57,8 +57,8 @@ class PandaPbvs(mujoco_viewer.CustomViewer):
         # 线速度控制
         k_p_lin = 1.0
         x = 0.5
-        y = 0.0
-        z = 0.1
+        y = 0.2
+        z = 0.3
         p_des = np.array([x, y, z])
         e_p =  ee_pos - p_des
         v_des_lin = -k_p_lin * e_p

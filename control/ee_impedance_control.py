@@ -57,10 +57,12 @@ class ArmManualControlViewer(ArmBaseViewer):
         ee_err = np.hstack([pos_err, rot_err])
 
         # ===== Jacobian =====
-        0 = self.kinematics.J(q)  # 6x7
+        J = self.kinematics.J(q)  # 6x7
 
         # ===== 末端速度 =====
         ee_vel = J @ dq
+        print("ee_vel:", ee_vel)   
+        print("ee_err:", ee_err)
 
         # ===== 动力学矩阵 =====
         nv = self.model.nv
@@ -101,9 +103,9 @@ class ArmManualControlViewer(ArmBaseViewer):
         self.data.ctrl[:7] = tau
 
         # ===== Debug =====
-        print("pos_err:", np.linalg.norm(pos_err), "rot_err:", np.linalg.norm(rot_err), "F:", F)
-        print("tau:", tau, "tau_task:", tau_task, "tau_null:", tau_null, "tau_joint:", tau_joint, "tau_bias:", tau_bias)
-
+        # print("pos_err:", np.linalg.norm(pos_err), "rot_err:", np.linalg.norm(rot_err), "F:", F)
+        # print("tau:", tau, "tau_task:", tau_task, "tau_null:", tau_null, "tau_joint:", tau_joint, "tau_bias:", tau_bias)
+        print("J:", J)
 
 if __name__ == '__main__':
     SCENE_XML_PATH = '/home/ethan/work/mujoco-learning-main/model/franka_emika_panda/scene_tau.xml'

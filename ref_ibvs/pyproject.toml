@@ -1,0 +1,18 @@
+[project]
+name = "mujoco-for-ur"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib>=3.10.9",
+    "mujoco>=3.0",
+    "numpy>=1.21.6,<2",
+    "opencv-python==4.10.0.84",
+    "roboticstoolbox-python>=1.1.1",
+    "scipy>=1.10",
+]
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple"
+default = true

@@ -7,7 +7,7 @@ class PandaKinematics:
     def __init__(self, arm_path="model/franka_panda_urdf/robots/panda_arm.urdf"):
         self.model = pinocchio.RobotWrapper.BuildFromURDF(arm_path).model if arm_path.endswith(".urdf") else pinocchio.RobotWrapper.BuildFromMJCF(arm_path).model
         self.data = self.model.createData()
-        self.JOINT_ID = 7
+        self.FRAME_ID = self.model.getFrameId("link7")
         print(f"✅ Panda 运动学类初始化完成，关节数: {self.model.nq}")
 
     def fk(self, q):
@@ -31,7 +31,7 @@ class PandaKinematics:
         i = 0
         while True:
             pinocchio.forwardKinematics(self.model, self.data, q)
-            iMd = self.data.oMi[self.JOINT_ID].actInv(oMdes)
+            iMd = self.data.oMi[self.FRAME_ID].actInv(oMdes)
             err = pinocchio.log(iMd).vector
             if norm(err) < eps:
                 success = True
@@ -40,7 +40,7 @@ class PandaKinematics:
                 success = False
                 break
 
-            J = pinocchio.computeJointJacobian(self.model, self.data, q, self.JOINT_ID)
+            J = pinocchio.computeJointJacobian(self.model, self.data, q, self.FRAME_ID)
             J = -np.dot(pinocchio.Jlog6(iMd.inverse()), J)
             v = -J.T.dot(solve(J.dot(J.T) + damp * np.eye(6), err))
             q = pinocchio.integrate(self.model, q, v * DT)
@@ -53,15 +53,3 @@ class PandaKinematics:
             print("❌ IK 未收敛")
         
         return success, q.flatten().tolist()
-
-    def J(self, q):
-        q = np.asarray(q).flatten()
-        assert len(q) == 7, "Jacobian 输入必须是7维关节角"
-        pinocchio.forwardKinematics(self.model, self.data, q)
-        J = pinocchio.getFrameJacobian(
-            self.model,
-            self.data,
-            self.JOINT_ID,
-            pinocchio.ReferenceFrame.WORLD
-        )
-        return J
