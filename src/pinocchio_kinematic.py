@@ -33,7 +33,7 @@ class PandaKinematics:
         assert len(q) == 7, "正解输入必须是7维关节角"
         pinocchio.forwardKinematics(self.model, self.data, q)
         pinocchio.updateFramePlacements(self.model, self.data)
-        T = self.data.oMi[self.JOINT_ID]
+        T = self.data.oMf[self.EE_FRAME_ID]
         pos = T.translation.copy()
         rot = T.rotation.copy()
         quat = rot_to_quat(rot)
@@ -49,7 +49,8 @@ class PandaKinematics:
         i = 0
         while True:
             pinocchio.forwardKinematics(self.model, self.data, q)
-            iMd = self.data.oMi[self.FRAME_ID].actInv(oMdes)
+            pinocchio.updateFramePlacements(self.model, self.data)
+            iMd = self.data.oMf[self.FRAME_ID].actInv(oMdes)
             err = pinocchio.log(iMd).vector
             if norm(err) < eps:
                 success = True
@@ -58,7 +59,13 @@ class PandaKinematics:
                 success = False
                 break
 
-            J = pinocchio.computeJointJacobian(self.model, self.data, q, self.FRAME_ID)
+            J = pinocchio.computeFrameJacobian(
+                self.model,
+                self.data,
+                q,
+                self.FRAME_ID,
+                pinocchio.ReferenceFrame.LOCAL,
+            )
             J = -np.dot(pinocchio.Jlog6(iMd.inverse()), J)
             v = -J.T.dot(solve(J.dot(J.T) + damp * np.eye(6), err))
             q = pinocchio.integrate(self.model, q, v * DT)

@@ -1,6 +1,6 @@
 import mujoco
 import numpy as np
-from arm_base import ArmBaseViewer, ROOT_DIR
+from mujoco_viewer import ArmBaseViewer, ROOT_DIR
 
 class JointAdmittanceControlViewer(ArmBaseViewer):
     def __init__(self, render_path, arm_path):

@@ -1,6 +1,6 @@
 import mujoco
 import numpy as np
-from arm_base import ArmBaseViewer, ROOT_DIR
+from mujoco_viewer import ArmBaseViewer, ROOT_DIR
 from utils import euler2rotmat
 
 class JointImpedanceControlViewer(ArmBaseViewer):

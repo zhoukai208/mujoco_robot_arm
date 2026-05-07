@@ -3,7 +3,7 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-from arm_base import ArmBaseViewer, ROOT_DIR
+from mujoco_viewer import ArmBaseViewer, ROOT_DIR
 from utils import *
 import time
 

@@ -2,7 +2,7 @@ import yaml
 import mujoco
 import random
 import numpy as np
-from arm_base import ArmBaseViewer, ROOT_DIR
+from mujoco_viewer import ArmBaseViewer, ROOT_DIR
 from utils import *
 import pickle
 

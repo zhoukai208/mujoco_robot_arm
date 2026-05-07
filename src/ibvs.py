@@ -5,7 +5,7 @@ import mujoco
 import numpy as np
 from pupil_apriltags import Detector
 
-from arm_base import ArmBaseViewer, ROOT_DIR
+from mujoco_viewer import ArmBaseViewer, ROOT_DIR
 
 
 TAG_IDS = (0, 1, 2, 3)
