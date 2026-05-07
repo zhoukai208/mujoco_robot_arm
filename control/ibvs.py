@@ -1,365 +1,535 @@
-import yaml
-import numpy as np
-import mujoco
+from dataclasses import dataclass
+
 import cv2
-import pinocchio
-from scipy.spatial.transform import Rotation as R
-from arm_base import ArmBaseViewer
-from utils import *
+import mujoco
+import numpy as np
 from pupil_apriltags import Detector
 
-# ====================== AprilTag 位姿估计器（封装类，不变） ======================
+from arm_base import ArmBaseViewer
+
+
+TAG_IDS = (0, 1, 2, 3)
+
+KEY_NONE = 255
+KEY_LEFT = 81
+KEY_RIGHT = 83
+KEY_UP = 82
+KEY_DOWN = 84
+
+JOINT_SPEED_LIMIT = 1.0
+OBSERVATION_KP = 2.0
+OBSERVATION_REACHED_THRESHOLD = 0.2
+DLS_DAMPING = 0.02
+
+
+def skew(p):
+    return np.array(
+        [
+            [0.0, -p[2], p[1]],
+            [p[2], 0.0, -p[0]],
+            [-p[1], p[0], 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def adjoint(T):
+    R = T[:3, :3]
+    p = T[:3, 3]
+    Ad = np.zeros((6, 6), dtype=np.float64)
+    Ad[:3, :3] = R
+    Ad[:3, 3:] = skew(p) @ R
+    Ad[3:, 3:] = R
+    return Ad
+
+
+@dataclass(frozen=True)
+class ImageFeatures:
+    uv: np.ndarray
+    z: np.ndarray
+
+    def __post_init__(self):
+        uv = np.asarray(self.uv, dtype=np.float64)
+        z = np.asarray(self.z, dtype=np.float64)
+        if uv.shape != (4, 2) or z.shape != (4,):
+            raise ValueError(f"ImageFeatures expects uv=(4, 2), z=(4,), got {uv.shape}, {z.shape}")
+        object.__setattr__(self, "uv", uv)
+        object.__setattr__(self, "z", z)
+
+    @property
+    def u(self):
+        return self.uv[:, 0]
+
+    @property
+    def v(self):
+        return self.uv[:, 1]
+
+
+@dataclass(frozen=True)
+class ServoState:
+    features: ImageFeatures
+    error: np.ndarray
+    v_cam_cv: np.ndarray
+    v_ee: np.ndarray
+    J_ee: np.ndarray
+    q_dot: np.ndarray
+
+
 class AprilTagPoseEstimator:
-    def __init__(self, fx, fy, cx, cy, tag_size):
-        self.detector = Detector(families="tag36h11", nthreads=4)
-        self.camera_params = (fx, fy, cx, cy)
-        self.tag_size = tag_size
-        # OpenCV -> MuJoCo 坐标校正
-        self.R_MJ_FROM_CV = np.eye(4)
-        self.R_MJ_FROM_CV[:3, :3] = np.diag([1.0, -1.0, -1.0])
-
-    def detect_and_estimate(self, frame, T_world_cam):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        detections = self.detector.detect(
-            gray, estimate_tag_pose=True,
-            camera_params=self.camera_params, tag_size=self.tag_size
+    def __init__(self, tag_ids=TAG_IDS):
+        self.detector = Detector(
+            families="tag36h11",
+            nthreads=2,
+            quad_decimate=1.0,
+            refine_edges=1,
         )
+        self.tag_ids = tuple(tag_ids)
+
+    def detect(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        detections = self.detector.detect(gray)
+        detection_by_id = {
+            int(det.tag_id): det
+            for det in detections
+            if int(det.tag_id) in self.tag_ids
+        }
+
         annotated_frame = frame.copy()
-        if not detections:
-            return False, None, annotated_frame, None
+        for det in detection_by_id.values():
+            self._draw_detection(annotated_frame, det)
 
-        det = detections[0]
-        self._draw_detection(annotated_frame, det)
+        missing_ids = [tag_id for tag_id in self.tag_ids if tag_id not in detection_by_id]
+        return len(missing_ids) == 0, annotated_frame, detection_by_id, missing_ids
 
-        # Tag在相机系位姿
-        T_cam_tag = np.eye(4)
-        T_cam_tag[:3, :3] = det.pose_R
-        T_cam_tag[:3, 3] = det.pose_t.flatten()
-        # Tag在世界系位姿
-        T_world_tag = T_world_cam @ self.R_MJ_FROM_CV @ T_cam_tag
-
-        return True, T_world_tag, annotated_frame, det
-
-    def _draw_detection(self, frame, det):
+    @staticmethod
+    def _draw_detection(frame, det):
         corners = det.corners.astype(int)
         cv2.polylines(frame, [corners], True, (0, 255, 0), 2)
         cx, cy = int(det.center[0]), int(det.center[1])
-        cv2.putText(frame, f"ID:{det.tag_id}", (cx, cy),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+        cv2.putText(
+            frame,
+            f"ID:{det.tag_id}",
+            (cx, cy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 0, 255),
+            2,
+        )
 
 
 class IBVSController:
-    def __init__(self, fx, fy, cx, cy, gain=1.5):
-        self.fx = fx    # 相机内参
-        self.fy = fy
-        self.cx = cx
-        self.cy = cy
-        self.lambda_ibvs = gain  # IBVS控制增益
-        
-        # 目标图像特征：4个点 (u, v)
-        self.target_u = np.array([219.7, 259.3, 225.9, 185.8])
-        self.target_v = np.array([81.9,  117.4, 155.9, 120.8])
+    def __init__(self, fx, fy, cx, cy, gain=1.5, stop_threshold_px=8.0):
+        self.fx = float(fx)
+        self.fy = float(fy)
+        self.cx = float(cx)
+        self.cy = float(cy)
+        self.lambda_ibvs = float(gain)
+        self.stop_threshold_px = float(stop_threshold_px)
 
-    def set_uv(self, u, v):
-        self.target_u = u
-        self.target_v = v
+        self.target_u = np.zeros(4, dtype=np.float64)
+        self.target_v = np.zeros(4, dtype=np.float64)
+        self.target_z = None
 
-    def build_image_jacobian(self, u, v, Z):
-        """
-        构建 单个点 的图像雅可比矩阵 (2x6)
-        :param u: 当前像素x
-        :param v: 当前像素y
-        :param Z: 深度
-        :return: J_i: 2x6 图像雅可比
-        """
-        if Z < 0.01: Z = 0.01  # 防止深度除零
-        u0 = u - self.cx
-        v0 = v - self.cy
+    def set_target(self, features):
+        self.target_u = features.u.copy()
+        self.target_v = features.v.copy()
+        self.target_z = features.z.copy()
 
-        J_i = np.array([
-            [-self.fx/Z,    0,         u0/Z,        (u0*v0)/self.fx,   -(self.fx**2 + u0**2)/self.fx,  v0],
-            [0,             -self.fy/Z, v0/Z,        (self.fy**2 + v0**2)/self.fy, -(u0*v0)/self.fy,  -u0]
-        ])
-        return J_i
-
-    def compute_ibvs_control(self, U, V, Z, cam_jacobian=None):
-        """
-        IBVS 主控制律（输入 4 个点）
-        :param U: 当前 4 个角点的 u 坐标     (4,)
-        :param V: 当前 4 个角点的 v 坐标     (4,)
-        :param Z: 当前 4 个角点的深度        (4,)
-        :param cam_jacobian: 相机6D速度雅可比 (6, DOF) 例如熊猫臂7自由度：(6,7)
-        :return: q_dot: 关节速度指令          (DOF,)
-                 error: 图像误差               (8,)
-        """
-        J_image = []
-        error = []
-
-        # ======================
-        # 遍历 4 个点，逐个构建图像雅可比 + 计算误差
-        # ======================
-        for i in range(4):
-            u = U[i]
-            v = V[i]
-            z = Z[i]
-
-            # 1. 计算单个点的图像误差 (e_u, e_v)
-            e_u = u - self.target_u[i]
-            e_v = v - self.target_v[i]
-
-            # 2. 构建单个点的图像雅可比 2x6
-            J_i = self.build_image_jacobian(u, v, z)
-
-            # 3. 存入列表
-            error.append([e_u, e_v])
-            J_image.append(J_i)
-
-        # ======================
-        # 拼接成全局 8x6 图像雅可比 & 8维误差
-        # ======================
-        error = np.array(error).flatten()  # (8,)
-        J_image = np.vstack(J_image)       # (8,6)
-
-        # print(f"J_image: {list(J_image)}")
-
-        J_pinv = np.linalg.pinv(J_image)
-        v_cam = -self.lambda_ibvs * (J_pinv @ error)
-        # print(f"v_cam: {list(v_cam)}")
-        return v_cam, error
-
-    def get_target_uv(self):
+    def target_uv(self):
         return self.target_u, self.target_v
 
-# ====================== 主程序：机械臂IBVS伺服控制 ======================
-class ArmIBVS(ArmBaseViewer):
-    def __init__(self, render_path, arm_path, yaml_path):
-        super().__init__(render_path, arm_path)
-        self.yaml_path = yaml_path
+    def build_point_interaction_matrix(self, u, v, z):
+        z = max(float(z), 1e-6)
+        x = (u - self.cx) / self.fx
+        y = (v - self.cy) / self.fy
 
-        # 相机ID
-        self.cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "eye_in_hand")
-        self.tag_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "apriltag_0")
-        # init 里
-        self.cam_site_id = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_SITE, "cam_site"
+        return np.array(
+            [
+                [-1.0 / z, 0.0, x / z, x * y, -(1.0 + x * x), y],
+                [0.0, -1.0 / z, y / z, 1.0 + y * y, -x * y, -x],
+            ],
+            dtype=np.float64,
         )
-        # 相机内参
-        self.fx, self.fy = 415.7, 415.7
-        self.cx, self.cy = 320.0, 240.0
-        self.tag_size = 0.1
 
-        # 初始化工具类
-        self.tag_estimator = AprilTagPoseEstimator(self.fx, self.fy, self.cx, self.cy, self.tag_size)
-        self.ibvs = IBVSController(self.fx, self.fy, self.cx, self.cy, gain=0.1)
+    def compute_camera_velocity(self, features):
+        z_control = self.target_z if self.target_z is not None else features.z
+        image_jacobian = []
+        error_pixel = []
+        error_normalized = []
 
-        self.R_MJ_FROM_CV = np.eye(4)
-        self.R_MJ_FROM_CV[:3, :3] = np.diag([1.0, -1.0, -1.0])
-        
-        self.ob_q = [0, 0.314, 0, - 0.754, 0, 1.19, 0]
+        for i in range(4):
+            e_u = self.target_u[i] - features.u[i]
+            e_v = self.target_v[i] - features.v[i]
+
+            error_pixel.append([e_u, e_v])
+            error_normalized.append([e_u / self.fx, e_v / self.fy])
+            image_jacobian.append(
+                self.build_point_interaction_matrix(features.u[i], features.v[i], z_control[i])
+            )
+
+        error_pixel = np.asarray(error_pixel, dtype=np.float64).flatten()
+        error_normalized = np.asarray(error_normalized, dtype=np.float64).reshape(8, 1)
+        image_jacobian = np.vstack(image_jacobian)
+
+        if np.linalg.norm(error_pixel) < self.stop_threshold_px:
+            return np.zeros(6, dtype=np.float64), error_pixel
+
+        v_cam = self.lambda_ibvs * (np.linalg.pinv(image_jacobian) @ error_normalized).flatten()
+        return v_cam, error_pixel
+
+
+class ArmIBVS(ArmBaseViewer):
+    def __init__(self, render_path, arm_path):
+        super().__init__(render_path, arm_path)
+
+        self.cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "eye_in_hand")
+        self.target_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "tag_target")
+
+        self.fx, self.fy, self.cx, self.cy = self.calc_intrinsics()
+        self.tag_ids = TAG_IDS
+        self.tag_feature_offsets_local = self.get_tag_feature_offsets_local()
+
+        self.tag_estimator = AprilTagPoseEstimator(self.tag_ids)
+        self.ibvs = IBVSController(self.fx, self.fy, self.cx, self.cy, gain=0.8, stop_threshold_px=8.0)
+
+        self.T_MJ_CAMERA_FROM_CV_CAMERA = np.eye(4, dtype=np.float64)
+        self.T_MJ_CAMERA_FROM_CV_CAMERA[:3, :3] = np.diag([1.0, -1.0, -1.0])
+
+        self.ob_q = np.array([0.0, 0.314, 0.0, -0.754, 0.0, 1.19, 0.0], dtype=np.float64)
         self.reach_ob = False
-        # 窗口
+        self.tag_translation_step = 0.1
+        self.tag_rotation_step = 0.1
+        self.tag_actuator_ids = self.get_tag_actuator_ids()
+
         self.window_name = "IBVS Servo"
         cv2.namedWindow(self.window_name)
 
     def runBefore(self):
         super().runBefore()
+        self.data.qvel[:] = 0.0
+        if getattr(self.data, "act", None) is not None and self.data.act.size >= 7:
+            for i in range(7):
+                jid = self.model.actuator_trnid[i][0]
+                qadr = self.model.jnt_qposadr[jid]
+                self.data.act[i] = self.data.qpos[qadr]
+        mujoco.mj_forward(self.model, self.data)
 
+    def get_tag_actuator_ids(self):
+        return {
+            "x": self.model.actuator("tag_x_pos").id,
+            "y": self.model.actuator("tag_y_pos").id,
+            "z": self.model.actuator("tag_z_pos").id,
+            "roll": self.model.actuator("tag_roll_pos").id,
+            "pitch": self.model.actuator("tag_pitch_pos").id,
+            "yaw": self.model.actuator("tag_yaw_pos").id,
+        }
 
-    def get_tag_corners(self, T_world_cam):
-        T_world_tag = np.eye(4)
-        T_world_tag[:3,3] = self.data.xpos[self.tag_id].copy()
-        T_world_tag[:3,:3] =  self.data.xmat[self.tag_id].reshape(3,3).copy()
-        
-        half = self.tag_size / 2
-        corners_tag_local = [
-            [ half,  half, 0, 1],   # 右上角
-            [ half, -half, 0, 1],   # 右下角
-            [-half, -half, 0, 1],   # 左下角
-            [-half,  half, 0, 1],   # 左上角
-        ]
+    def get_tag_feature_offsets_local(self):
+        offsets = []
+        for tag_id in self.tag_ids:
+            geom_id = self.model.geom(f"apriltag_{tag_id}").id
+            offsets.append(self.model.geom_pos[geom_id].copy())
+        return np.asarray(offsets, dtype=np.float64)
 
-        corners_world = []
-        for p_local in corners_tag_local:
-            p_world = T_world_tag @ p_local   # 齐次乘法，一步到位
-            corners_world.append(p_world[:3]) # 取前3位：[x,y,z]
+    def get_target_feature_points_world(self):
+        target_pos = self.data.xpos[self.target_body_id].copy()
+        target_rot = self.data.xmat[self.target_body_id].reshape(3, 3)
+        return np.array([target_pos + target_rot @ offset for offset in self.tag_feature_offsets_local])
 
-        T_cam_world = np.linalg.inv(T_world_cam)
-
-        corners_cam = []
-        for p_world in corners_world:
-            p_world_homo = [p_world[0], p_world[1], p_world[2], 1]
-            p_cam = T_cam_world @ p_world_homo
-            p_cam = self.R_MJ_FROM_CV @ p_cam
-            corners_cam.append(p_cam[:3])
-
-        return np.array(corners_cam)
-
-    def sort_corners(self, corners):
-        c = corners.copy()
-        center = np.mean(c, axis=0)
-        angles = np.arctan2(c[:,1]-center[1], c[:,0]-center[0])
-        idx = np.argsort(angles)
-        return c[idx]
-
-    def runFunc(self):
-
-        frame = self.get_camera_image(show=False)
+    def project_target_feature_points(self):
+        points_world = self.get_target_feature_points_world()
         cam_R = self.data.cam_xmat[self.cam_id].reshape(3, 3)
-        cam_t = self.data.cam_xpos[self.cam_id]
-        T_world_cam = np.eye(4)
-        T_world_cam[:3, :3] = cam_R
-        T_world_cam[:3, 3] = cam_t
+        cam_t = self.data.cam_xpos[self.cam_id].copy()
+        world_R_cam = cam_R.T
 
+        uv = []
+        z = []
+        for point_world in points_world:
+            point_cam = world_R_cam @ (point_world - cam_t)
+            depth = float(-point_cam[2])
+            if depth <= 1e-6:
+                return None
 
-        if not self.reach_ob:
-            q = self.data.qpos[:7].copy()
-            Kp = 2
-            self.data.ctrl[:7] = Kp * (self.ob_q - q)
-            q_diff = np.linalg.norm(q - self.ob_q)
-            if q_diff < 0.2:
-                self.reach_ob = True
-                success, T_world_tag, annotated_frame, det = self.tag_estimator.detect_and_estimate(frame, T_world_cam)
-                corners = self.sort_corners(det.corners)  
-                U = corners[:, 0]
-                V = corners[:, 1]
-                print(f"set U: {U}")
-                print(f"set V: {V}")
-                self.ibvs.set_uv(U, V)  
-                print("Reach obstacle")
-            else:
-                print(f"diff: {q_diff}")
+            u = self.cx + self.fx * point_cam[0] / depth
+            v = self.cy - self.fy * point_cam[1] / depth
+            uv.append([u, v])
+            z.append(depth)
+
+        return ImageFeatures(uv=np.asarray(uv, dtype=np.float64), z=np.asarray(z, dtype=np.float64))
+
+    def detection_image_features(self, detection_by_id):
+        projected_features = self.project_target_feature_points()
+        if projected_features is None:
+            return None
+
+        centers = np.array(
+            [detection_by_id[tag_id].center for tag_id in self.tag_ids],
+            dtype=np.float64,
+        )
+        return ImageFeatures(uv=centers, z=projected_features.z)
+
+    def process_tag_keyboard(self, key):
+        if key == KEY_NONE:
             return
 
+        trans_ids = [self.tag_actuator_ids[k] for k in ("x", "y", "z")]
+        rot_ids = [self.tag_actuator_ids[k] for k in ("roll", "pitch", "yaw")]
+        pos = self.data.ctrl[trans_ids].copy()
+        rot = self.data.ctrl[rot_ids].copy()
 
-        key = cv2.waitKey(1) & 0xFF
+        if key == KEY_LEFT:
+            pos[0] -= self.tag_translation_step
+        elif key == KEY_RIGHT:
+            pos[0] += self.tag_translation_step
+        elif key == KEY_UP:
+            pos[1] += self.tag_translation_step
+        elif key == KEY_DOWN:
+            pos[1] -= self.tag_translation_step
+        elif key == ord("u"):
+            pos[2] += self.tag_translation_step
+        elif key == ord("o"):
+            pos[2] -= self.tag_translation_step
+        elif key == ord("q"):
+            rot[0] += self.tag_rotation_step
+        elif key == ord("e"):
+            rot[0] -= self.tag_rotation_step
+        elif key == ord("w"):
+            rot[1] += self.tag_rotation_step
+        elif key == ord("s"):
+            rot[1] -= self.tag_rotation_step
+        elif key == ord("a"):
+            rot[2] += self.tag_rotation_step
+        elif key == ord("d"):
+            rot[2] -= self.tag_rotation_step
+        else:
+            return
 
-        # 每次按键盘动 0.02 米（可以自己改大小）
-        step = 0.06  
+        pos_range = self.model.actuator_ctrlrange[trans_ids]
+        rot_range = self.model.actuator_ctrlrange[rot_ids]
+        self.data.ctrl[trans_ids] = np.clip(pos, pos_range[:, 0], pos_range[:, 1])
+        self.data.ctrl[rot_ids] = np.clip(rot, rot_range[:, 0], rot_range[:, 1])
 
-        # 获取当前 tag 的 3 个轴位置
-        tx = self.data.joint("tag_x").qpos[0]
-        ty = self.data.joint("tag_y").qpos[0]
-        tz = self.data.joint("tag_z").qpos[0]
+    def draw_features(self, frame, features):
+        if features is not None:
+            for i, tag_id in enumerate(self.tag_ids):
+                u, v = np.round(features.uv[i]).astype(int)
+                cv2.circle(frame, (u, v), 6, (255, 0, 0), -1)
+                cv2.putText(
+                    frame,
+                    str(tag_id),
+                    (u - 18, v - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2,
+                )
 
-        # 方向控制
-        if key == ord('j'): tx -= step  # 左
-        if key == ord('l'): tx += step  # 右
-        if key == ord('i'): ty += step  # 前
-        if key == ord('k'): ty -= step  # 后
-        if key == ord('u'): tz += step  # 上
-        if key == ord('o'): tz -= step  # 下
+        target_u, target_v = self.ibvs.target_uv()
+        for i, tag_id in enumerate(self.tag_ids):
+            u, v = int(round(target_u[i])), int(round(target_v[i]))
+            cv2.circle(frame, (u, v), 7, (0, 0, 255), 2)
+            cv2.putText(
+                frame,
+                str(tag_id),
+                (u - 18, v - 12),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
+            )
 
-        # 把位置发给执行器（位置控制）
-        self.data.ctrl[self.model.actuator("tag_x_act").id] = tx
-        self.data.ctrl[self.model.actuator("tag_y_act").id] = ty
-        self.data.ctrl[self.model.actuator("tag_z_act").id] = tz
+    def get_body_transform(self, body_id):
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = self.data.xmat[body_id].reshape(3, 3)
+        T[:3, 3] = self.data.xpos[body_id]
+        return T
 
-        if self.print_counter == 0:
-            print("\n" + "#"*60)
-            print("# IBVS Controller Initialized")
-            print("#"*60)
-            print(f"[Init] Camera ID: {self.cam_id}")
-            print(f"[Init] Camera Site ID: {self.cam_site_id}")
-            print(f"[Init] Camera intrinsics: fx={self.fx}, fy={self.fy}, cx={self.cx}, cy={self.cy}")
-            print(f"[Init] IBVS gain: {self.ibvs.lambda_ibvs}")
-            print(f"[Init] Target UV: U={self.ibvs.target_u}, V={self.ibvs.target_v}")
-            print("#"*60 + "\n")
-        
+    def get_camera_transform(self):
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = self.data.cam_xmat[self.cam_id].reshape(3, 3)
+        T[:3, 3] = self.data.cam_xpos[self.cam_id]
+        return T
 
-        if self.print_counter % 100 == 0:
-            print(f"\n[Camera] Position: {cam_t}")
-            print(f"[Camera] Rotation matrix:\n{cam_R}")
+    def camera_optical_velocity_to_ee(self, v_cam_cv):
+        T_world_ee = self.get_body_transform(self.ee_id)
+        T_world_cam_mj = self.get_camera_transform()
+        T_ee_cam_cv = (
+            np.linalg.inv(T_world_ee)
+            @ T_world_cam_mj
+            @ self.T_MJ_CAMERA_FROM_CV_CAMERA
+        )
+        return (adjoint(T_ee_cam_cv) @ np.asarray(v_cam_cv, dtype=np.float64).reshape(6, 1)).flatten()
 
-        success, T_world_tag, annotated_frame, det = self.tag_estimator.detect_and_estimate(frame, T_world_cam)
-        
+    def end_effector_jacobian(self):
+        Jp = np.zeros((3, self.model.nv), dtype=np.float64)
+        Jr = np.zeros((3, self.model.nv), dtype=np.float64)
+        mujoco.mj_jacBody(self.model, self.data, Jp, Jr, self.ee_id)
+
+        J_world = np.vstack([Jp, Jr])[:, :7]
+        ee_R_world = self.get_body_transform(self.ee_id)[:3, :3].T
+        X_ee_world = np.zeros((6, 6), dtype=np.float64)
+        X_ee_world[:3, :3] = ee_R_world
+        X_ee_world[3:, 3:] = ee_R_world
+        return X_ee_world @ J_world
+
+    def compute_joint_velocity(self, v_ee):
+        J_ee = self.end_effector_jacobian()
+        damping_matrix = DLS_DAMPING * DLS_DAMPING * np.eye(6)
+        q_dot = J_ee.T @ np.linalg.solve(J_ee @ J_ee.T + damping_matrix, v_ee)
+        q_dot = np.clip(q_dot, -JOINT_SPEED_LIMIT, JOINT_SPEED_LIMIT)
+        return q_dot, J_ee
+
+    def move_to_observation_pose(self, frame):
+        q = self.data.qpos[:7].copy()
+        self.data.ctrl[:7] = np.clip(
+            OBSERVATION_KP * (self.ob_q - q),
+            -JOINT_SPEED_LIMIT,
+            JOINT_SPEED_LIMIT,
+        )
+
+        q_diff = np.linalg.norm(q - self.ob_q)
+        if q_diff >= OBSERVATION_REACHED_THRESHOLD:
+            print(f"diff: {q_diff}")
+            return
+
+        success, _, detection_by_id, missing_ids = self.tag_estimator.detect(frame)
         if not success:
-            if self.print_counter % 10 == 0:
-                print(f"[IBVS] Frame {self.print_counter}: AprilTag NOT detected")
+            print(f"Reach obstacle pose, but AprilTag detection is incomplete, missing={missing_ids}")
+            return
 
-        if det is not None:
-            target_u, target_v = self.ibvs.get_target_uv()
-            for u, v in zip(target_u, target_v):
-                cv2.circle(annotated_frame, (int(u), int(v)), 5, (0, 255, 0), -1)
+        target_features = self.detection_image_features(detection_by_id)
+        if target_features is None:
+            print("Reach obstacle pose, but target feature depth is invalid")
+            return
 
-            # Sort corners by angle
-            corners = self.sort_corners(det.corners)
-            
-            U = corners[:, 0]
-            V = corners[:, 1]
+        self.ibvs.set_target(target_features)
+        self.reach_ob = True
+        print(f"set U: {target_features.u}")
+        print(f"set V: {target_features.v}")
+        print("Reach obstacle")
 
-            Z = self.get_tag_corners(T_world_cam)[:, 2]
- 
-            v_cam_mj, error = self.ibvs.compute_ibvs_control(U, V, Z, None)
-            
+    def run_visual_servo_step(self, detection_by_id):
+        current_features = self.detection_image_features(detection_by_id)
+        if current_features is None:
+            return None
 
-            def Ad(T):
-                """
-                SE(3) adjoint transform
-                T: 4x4
-                """
-                R = T[:3, :3]
-                p = T[:3, 3]
+        v_cam_cv, error = self.ibvs.compute_camera_velocity(current_features)
+        v_ee = self.camera_optical_velocity_to_ee(v_cam_cv)
+        q_dot, J_ee = self.compute_joint_velocity(v_ee)
+        self.data.ctrl[:7] = q_dot
 
-                p_hat = np.array([
-                    [0, -p[2], p[1]],
-                    [p[2], 0, -p[0]],
-                    [-p[1], p[0], 0]
-                ])
+        return ServoState(
+            features=current_features,
+            error=error,
+            v_cam_cv=v_cam_cv,
+            v_ee=v_ee,
+            J_ee=J_ee,
+            q_dot=q_dot,
+        )
 
-                Ad_T = np.zeros((6, 6))
-                Ad_T[:3, :3] = R
-                Ad_T[:3, 3:] = p_hat @ R
-                Ad_T[3:, 3:] = R
-                return Ad_T
-            v_world = Ad(T_world_cam) @ v_cam_mj
-            
-            
-            Jp = np.zeros((3, self.model.nv))
-            Jr = np.zeros((3, self.model.nv))
-            mujoco.mj_jacSite(self.model, self.data, Jp, Jr, self.cam_site_id)
-            J = np.vstack([Jp, Jr])[:, :7]
-            
-           
-            lam = 0.05
-            q_dot = J.T @ np.linalg.inv(J @ J.T + lam * lam * np.eye(6)) @ v_world
+    def print_init_once(self):
+        if self.print_counter != 0:
+            return
 
-            self.data.ctrl[:7] = q_dot
-        
+        print("\n" + "#" * 60)
+        print("# IBVS Controller Initialized")
+        print("#" * 60)
+        print(f"[Init] Camera ID: {self.cam_id}")
+        print(f"[Init] Camera intrinsics: fx={self.fx}, fy={self.fy}, cx={self.cx}, cy={self.cy}")
+        print(f"[Init] IBVS gain: {self.ibvs.lambda_ibvs}")
+        print(f"[Init] Target UV: U={self.ibvs.target_u}, V={self.ibvs.target_v}")
+        print("#" * 60 + "\n")
 
-        if self.print_counter % 50 == 0:
-            print("\n" + "="*60)
-            print(f"[IBVS] Frame {self.print_counter}")
-            print(f"[IBVS] AprilTag detected: ID={det.tag_id}")
-            print(f"[IBVS] Current corners (U,V):")
-            for i in range(4):
-                print(f"  Point {i}: U={U[i]:.1f}, V={V[i]:.1f}")
-            print(f"[IBVS] Target corners (U,V):")
-            for i in range(4):
-                print(f"  Point {i}: U={target_u[i]:.1f}, V={target_v[i]:.1f}")
+    def print_camera_debug(self):
+        if self.print_counter % 100 != 0:
+            return
 
-            print(f"[IBVS] Depth Z: {Z}")
-            print(f"[IBVS] Tag pose in camera: t={det.pose_t.flatten()}")
-            print(f"[IBVS] Image error (8D): {error}")
-            print(f"[IBVS] Error norm: {np.linalg.norm(error):.4f}")
-            print(f"[IBVS] Camera velocity (6D): {v_cam_mj}")
-            print(f"[IBVS] World velocity (6D): {v_world}")
-            print(f"[IBVS] Jacobian shape: {J.shape}")
-            print(f"[IBVS] Jacobian condition number: {np.linalg.cond(J):.2f}")
-            print(f"[IBVS] Jacobian rank: {np.linalg.matrix_rank(J)}")
-            print(f"[IBVS] Joint velocity (7D): {q_dot}")
-            print(f"[IBVS] Joint velocity norm: {np.linalg.norm(q_dot):.4f}")
-            print(f"[IBVS] Control command applied")
-            print("="*60 + "\n")
+        cam_R = self.data.cam_xmat[self.cam_id].reshape(3, 3)
+        cam_t = self.data.cam_xpos[self.cam_id]
+        print(f"\n[Camera] Position: {cam_t}")
+        print(f"[Camera] Rotation matrix:\n{cam_R}")
+
+    def print_detection_miss(self, detection_by_id, missing_ids):
+        if self.print_counter % 10 != 0:
+            return
+
+        detected_ids = sorted(detection_by_id.keys())
+        print(
+            f"[IBVS] Frame {self.print_counter}: AprilTag detection incomplete, "
+            f"detected={detected_ids}, missing={missing_ids}"
+        )
+
+    def print_servo_state(self, servo_state):
+        if self.print_counter % 50 != 0:
+            return
+
+        target_u, target_v = self.ibvs.target_uv()
+        features = servo_state.features
+
+        print("\n" + "=" * 60)
+        print(f"[IBVS] Frame {self.print_counter}")
+        print(f"[IBVS] AprilTag detected: ids={self.tag_ids}")
+        print("[IBVS] Current centers (U,V):")
+        for i in range(4):
+            print(f"  Point {i}: U={features.u[i]:.1f}, V={features.v[i]:.1f}")
+        print("[IBVS] Target centers (U,V):")
+        for i in range(4):
+            print(f"  Point {i}: U={target_u[i]:.1f}, V={target_v[i]:.1f}")
+
+        print(f"[IBVS] Depth Z: {features.z}")
+        print(f"[IBVS] Image error (8D): {servo_state.error}")
+        print(f"[IBVS] Error norm: {np.linalg.norm(servo_state.error):.4f}")
+        print(f"[IBVS] Camera optical velocity (6D): {servo_state.v_cam_cv}")
+        print(f"[IBVS] EE velocity (6D): {servo_state.v_ee}")
+        print(f"[IBVS] EE Jacobian shape: {servo_state.J_ee.shape}")
+        print(f"[IBVS] EE Jacobian condition number: {np.linalg.cond(servo_state.J_ee):.2f}")
+        print(f"[IBVS] EE Jacobian rank: {np.linalg.matrix_rank(servo_state.J_ee)}")
+        print(f"[IBVS] Joint velocity (7D): {servo_state.q_dot}")
+        print(f"[IBVS] Joint velocity norm: {np.linalg.norm(servo_state.q_dot):.4f}")
+        print("[IBVS] Control command applied")
+        if np.linalg.norm(servo_state.error) < self.ibvs.stop_threshold_px:
+            print(f"[IBVS] Error is within threshold ({self.ibvs.stop_threshold_px:.1f}px); target satisfied")
+        print("=" * 60 + "\n")
+
+    def show_frame_and_process_key(self, frame, current_features):
+        cv2.imshow(self.window_name, frame)
+        key = cv2.waitKey(1) & 0xFF
+        self.process_tag_keyboard(key)
+
+        if current_features is not None and key == ord("t"):
+            self.ibvs.set_target(current_features)
+            print("Updated target features from current tag centers")
+
+    def runFunc(self):
+        frame = self.get_camera_image(show=False)
+
+        if not self.reach_ob:
+            self.move_to_observation_pose(frame)
+            return
+
+        self.print_init_once()
+        self.print_camera_debug()
+
+        success, annotated_frame, detection_by_id, missing_ids = self.tag_estimator.detect(frame)
+        servo_state = None
+
+        if success:
+            servo_state = self.run_visual_servo_step(detection_by_id)
+            current_features = servo_state.features if servo_state is not None else None
+            self.draw_features(annotated_frame, current_features)
+            if servo_state is not None:
+                self.print_servo_state(servo_state)
+        else:
+            current_features = None
+            self.draw_features(annotated_frame, current_features)
+            self.print_detection_miss(detection_by_id, missing_ids)
+
         self.print_counter += 1
+        self.show_frame_and_process_key(annotated_frame, current_features)
 
 
-        cv2.imshow(self.window_name, annotated_frame)
-        cv2.waitKey(1)
+if __name__ == "__main__":
+    SCENE_XML_PATH = "/home/kplnb050/study/mujoco_robot_arm/model/franka_emika_panda/scene_with_apriltag.xml"
 
-
-if __name__ == '__main__':
-    SCENE_XML_PATH = '/home/ethan/work/mujoco-learning-main/model/franka_emika_panda/scene_with_apriltag.xml'
-    YAML_PATH = '/home/ethan/work/mujoco-learning-main/control/target_pos.yaml'
-    
-    robot = ArmIBVS(SCENE_XML_PATH, SCENE_XML_PATH, YAML_PATH)
+    robot = ArmIBVS(SCENE_XML_PATH, SCENE_XML_PATH)
     robot.run_loop()

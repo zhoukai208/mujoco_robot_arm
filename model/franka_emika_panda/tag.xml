@@ -1,0 +1,53 @@
+<mujoco model="ibvs apriltag target">
+  <asset>
+    <texture type="2d" name="apriltag_0_tex" file="../misc/textures/tag36h11_0.png"/>
+    <texture type="2d" name="apriltag_1_tex" file="../misc/textures/tag36h11_1.png"/>
+    <texture type="2d" name="apriltag_2_tex" file="../misc/textures/tag36h11_2.png"/>
+    <texture type="2d" name="apriltag_3_tex" file="../misc/textures/tag36h11_3.png"/>
+
+    <material name="tag_board_white" rgba="1 1 1 1" specular="0.1" shininess="0.1"/>
+    <material name="apriltag_0_mat" texture="apriltag_0_tex" texuniform="true" specular="0" shininess="0"/>
+    <material name="apriltag_1_mat" texture="apriltag_1_tex" texuniform="true" specular="0" shininess="0"/>
+    <material name="apriltag_2_mat" texture="apriltag_2_tex" texuniform="true" specular="0" shininess="0"/>
+    <material name="apriltag_3_mat" texture="apriltag_3_tex" texuniform="true" specular="0" shininess="0"/>
+
+    <mesh name="apriltag_square_100"
+      vertex="-0.05 -0.05 -0.00005  0.05 -0.05 -0.00005  0.05 0.05 -0.00005  -0.05 0.05 -0.00005
+              -0.05 -0.05 0.00005  0.05 -0.05 0.00005  0.05 0.05 0.00005  -0.05 0.05 0.00005"
+      texcoord="0 0  1 0  1 1  0 1  1 0  0 0  0 1  1 1"
+      face="0 2 1  0 3 2  4 5 6  4 6 7  0 1 5  0 5 4
+            1 2 6  1 6 5  2 3 7  2 7 6  3 0 4  3 4 7"/>
+  </asset>
+
+  <worldbody>
+    <body name="tag_target" pos="0.5 0 0.01" quat="1 0 0 0" gravcomp="1">
+      <joint name="tag_slide_x" type="slide" axis="1 0 0" range="-0.5 0.5" damping="20"/>
+      <joint name="tag_slide_y" type="slide" axis="0 1 0" range="-0.5 0.5" damping="20"/>
+      <joint name="tag_slide_z" type="slide" axis="0 0 1" range="-0.2 0.5" damping="20"/>
+      <joint name="tag_hinge_x" type="hinge" axis="1 0 0" range="-3.14159 3.14159" damping="5"/>
+      <joint name="tag_hinge_y" type="hinge" axis="0 1 0" range="-3.14159 3.14159" damping="5"/>
+      <joint name="tag_hinge_z" type="hinge" axis="0 0 1" range="-3.14159 3.14159" damping="5"/>
+
+      <geom name="tag_board" type="box" size="0.125 0.125 0.005" material="tag_board_white"
+        contype="0" conaffinity="0"/>
+
+      <geom name="apriltag_0" type="mesh" mesh="apriltag_square_100" pos="-0.075 0.075 0.0051"
+        material="apriltag_0_mat" contype="0" conaffinity="0"/>
+      <geom name="apriltag_1" type="mesh" mesh="apriltag_square_100" pos="0.075 0.075 0.0051"
+        material="apriltag_1_mat" contype="0" conaffinity="0"/>
+      <geom name="apriltag_2" type="mesh" mesh="apriltag_square_100" pos="0.075 -0.075 0.0051"
+        material="apriltag_2_mat" contype="0" conaffinity="0"/>
+      <geom name="apriltag_3" type="mesh" mesh="apriltag_square_100" pos="-0.075 -0.075 0.0051"
+        material="apriltag_3_mat" contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <position name="tag_x_pos" joint="tag_slide_x" kp="200" ctrlrange="-0.5 0.5"/>
+    <position name="tag_y_pos" joint="tag_slide_y" kp="200" ctrlrange="-0.5 0.5"/>
+    <position name="tag_z_pos" joint="tag_slide_z" kp="200" ctrlrange="-0.2 0.5"/>
+    <position name="tag_roll_pos" joint="tag_hinge_x" kp="50" ctrlrange="-3.14159 3.14159"/>
+    <position name="tag_pitch_pos" joint="tag_hinge_y" kp="50" ctrlrange="-3.14159 3.14159"/>
+    <position name="tag_yaw_pos" joint="tag_hinge_z" kp="50" ctrlrange="-3.14159 3.14159"/>
+  </actuator>
+</mujoco>

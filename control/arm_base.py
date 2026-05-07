@@ -46,10 +46,11 @@ class ArmBaseViewer(CustomViewer):
         import math
         fovy = self.model.cam_fovy[self.camera_id]
         fy = 0.5 * self.height / math.tan(fovy * math.pi / 360)
-        fx = fy * (self.width / self.height)
+        fx = fy
         cx = self.width / 2
         cy = self.height / 2
         print(f'camera intrinsics: {fx:.2f}, {fy:.2f}, {cx:.2f}, {cy:.2f}')
+        return fx, fy, cx, cy
 
     def runBefore(self):
         self.model.opt.timestep = 0.005

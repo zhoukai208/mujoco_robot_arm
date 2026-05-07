@@ -30,15 +30,24 @@ function installCasADi(){
   cd casadi
   mkdir build && cd build
   sudo apt install swig liblapack-dev libblas-dev -y
-  cmake .. -DCMAKE_BUILD_TYPE=Release \
-      -DPYTHON_EXECUTABLE=$(which python) \
-      -DCMAKE_INSTALL_PREFIX=$VIRTUAL_ENV \
-      -DWITH_BUILD_REQUIRED=ON \
-      -DWITH_BUILD_IPOPT=ON \
-      -DWITH_IPOPT=ON \
-      -DWITH_PYTHON=ON
+#   cmake .. -DCMAKE_BUILD_TYPE=Release \
+#       -DPYTHON_EXECUTABLE=$(which python) \
+#       -DCMAKE_INSTALL_PREFIX=$VIRTUAL_ENV \
+#       -DWITH_BUILD_REQUIRED=ON \
+#       -DWITH_BUILD_IPOPT=ON \
+#       -DWITH_IPOPT=ON \
+#       -DWITH_PYTHON=ON
 
-  make -j2
+  cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DPYTHON_EXECUTABLE=$(which python) \
+    -DCMAKE_INSTALL_PREFIX=$VIRTUAL_ENV \
+    -DWITH_PYTHON=ON \
+    -DWITH_IPOPT=OFF \
+    -DWITH_BUILD_IPOPT=OFF \
+    -DWITH_MUMPS=OFF
+
+  make -j4
   make install
   cd ../../
 }
@@ -67,7 +76,7 @@ function installPinocchio(){
     -Dcasadi_DIR="${VIRTUAL_ENV}/lib/cmake/casadi" \
     -DCMAKE_LIBRARY_PATH="${VIRTUAL_ENV}/lib"
 
-  make -j4
+  make -j2
   make install
 }
 

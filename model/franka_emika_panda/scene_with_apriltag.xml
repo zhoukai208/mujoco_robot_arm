@@ -1,5 +1,6 @@
 <mujoco model="panda scene">
   <include file="panda_tag.xml"/>
+  <include file="tag.xml"/>
 
   <statistic center="0.3 0 0.4" extent="1"/>
 
@@ -13,40 +14,12 @@
     <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
     <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
       markrgb="0.8 0.8 0.8" width="300" height="300"/>
-    <texture name="tag_0" type="2d" file="../misc/textures/apriltag_0.png" width="100" height="100"/>
-    <material name="mat_tag_0" texture="tag_0" rgba="1 1 1 1"/>
-    <material name="mat_white" rgba="1 1 1 1"/>
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
   </asset>
 
   <worldbody>
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
-    
-
-    <body name="tag_parent" pos="0.5 0.0 0.0">
-      <!-- X 左右 -->
-      <joint name="tag_x" type="slide" axis="1 0 0" range="-0.6 0.6" damping="10" armature="0.1"/>
-      <!-- Y 前后 -->
-      <joint name="tag_y" type="slide" axis="0 1 0" range="-0.6 0.6" damping="10" armature="0.1"/>
-      <!-- Z 上下 -->
-      <joint name="tag_z" type="slide" axis="0 0 1" range="0.2 1.0" damping="10" armature="0.1"/>
-
-      <body name="apriltag_0" euler="0 0 0">
-        <geom name="apriltag_0" type="box" size="0.05 0.05 0.0002" material="mat_tag_0"/>
-        <geom name="apriltag_bottom" type="box" size="0.07 0.07 0.0001" material="mat_white"/>
-      </body>
-    </body>
-
-
-
   </worldbody>
-
-    <!-- 位置执行器：控制 tag 三轴位置 -->
-    <actuator>
-      <position name="tag_x_act" joint="tag_x" kp="100" forcerange="-5 5"/>
-      <position name="tag_y_act" joint="tag_y" kp="100" forcerange="-5 5"/>
-      <position name="tag_z_act" joint="tag_z" kp="100" forcerange="-5 5"/>
-    </actuator>
 
 </mujoco>

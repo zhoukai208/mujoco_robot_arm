@@ -108,6 +108,6 @@ class ArmManualControlViewer(ArmBaseViewer):
         print("J:", J)
 
 if __name__ == '__main__':
-    SCENE_XML_PATH = '/home/ethan/work/mujoco-learning-main/model/franka_emika_panda/scene_tau.xml'
+    SCENE_XML_PATH = '/home/kplnb050/study/mujoco_robot_arm/model/franka_emika_panda/scene_tau.xml'
     robot = ArmManualControlViewer(SCENE_XML_PATH, SCENE_XML_PATH)
     robot.run_loop()
