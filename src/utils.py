@@ -126,3 +126,32 @@ def dampedPinv(J, lambda_d=0.1):
     damping = lambda_d ** 2 * np.eye(J.shape[0])
     J_pinv_damped = np.dot(J_T, np.linalg.inv(np.dot(J, J_T) + damping))
     return J_pinv_damped
+
+def rot_to_quat(rot):
+    """旋转矩阵 转 四元数 [w, x, y, z]（纯numpy，无pinocchio报错）"""
+    tr = np.trace(rot)
+    if tr > 0:
+        S = np.sqrt(tr + 1.0) * 2
+        qw = 0.25 * S
+        qx = (rot[2,1] - rot[1,2]) / S
+        qy = (rot[0,2] - rot[2,0]) / S
+        qz = (rot[1,0] - rot[0,1]) / S
+    elif (rot[0,0] > rot[1,1]) and (rot[0,0] > rot[2,2]):
+        S = np.sqrt(1.0 + rot[0,0] - rot[1,1] - rot[2,2]) * 2
+        qw = (rot[2,1] - rot[1,2]) / S
+        qx = 0.25 * S
+        qy = (rot[0,1] + rot[1,0]) / S
+        qz = (rot[0,2] + rot[2,0]) / S
+    elif rot[1,1] > rot[2,2]:
+        S = np.sqrt(1.0 + rot[1,1] - rot[0,0] - rot[2,2]) * 2
+        qw = (rot[0,2] - rot[2,0]) / S
+        qx = (rot[0,1] + rot[1,0]) / S
+        qy = 0.25 * S
+        qz = (rot[1,2] + rot[2,1]) / S
+    else:
+        S = np.sqrt(1.0 + rot[2,2] - rot[0,0] - rot[1,1]) * 2
+        qw = (rot[1,0] - rot[0,1]) / S
+        qx = (rot[0,2] + rot[2,0]) / S
+        qy = (rot[1,2] + rot[2,1]) / S
+        qz = 0.25 * S
+    return np.array([qw, qx, qy, qz])

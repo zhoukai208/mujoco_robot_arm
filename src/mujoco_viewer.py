@@ -4,7 +4,7 @@ import mujoco.viewer
 from xml.etree import ElementTree as ET
 from io import StringIO
 import numpy as np
-import src.utils as utils
+import utils as utils
 import glfw
 import cv2
 

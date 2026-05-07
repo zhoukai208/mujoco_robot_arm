@@ -1,6 +1,32 @@
+# Text/data scratch files
 *TXT
 # *.png
-*.pyc
+
+# Python caches and local environments
+*.py[cod]
+__pycache__/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Local agent state
+.agents/
+.codex/
+
+# Generated behavior-cloning artifacts
+/artifacts/bc_reach/*.pkl
+/artifacts/bc_reach/*.pth
+/artifacts/bc_reach/*.png
+/bc_reach_dataset.pkl
+/bc_reach_*_model.pth
+/bc_loss_curve.png
+/src/bc_reach_dataset.pkl
+/src/bc_reach_*_model.pth
+/src/bc_loss_curve.png
+
+# Third-party build/install folders
 tensorboard
 pinocchio
 eigenpy
