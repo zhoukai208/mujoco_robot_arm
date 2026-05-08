@@ -4,8 +4,9 @@ import io
 import cv2
 import mujoco
 import numpy as np
-from mujoco_viewer import ArmBaseViewer, ROOT_DIR
+from mujoco_viewer import ArmBaseViewer
 from utils import euler2rotmat
+from xml_paths import PANDA_POS_SCENE_XML
 
 
 KEY_NONE = -1
@@ -124,6 +125,6 @@ class ArmManualControlViewer(ArmBaseViewer):
             self.data.ctrl[7:] = self.gripper_cmd
 
 if __name__ == '__main__':
-    SCENE_XML_PATH = str(ROOT_DIR / 'model/franka_emika_panda/scene_pos.xml')
+    SCENE_XML_PATH = PANDA_POS_SCENE_XML
     robot = ArmManualControlViewer(SCENE_XML_PATH, SCENE_XML_PATH)
     robot.run_loop()

@@ -3,6 +3,7 @@ import random
 import numpy as np
 from mujoco_viewer import ArmBaseViewer, ROOT_DIR
 from utils import *
+from xml_paths import PANDA_POS_SCENE_XML
 import pickle
 
 class BCDataVisualizer(ArmBaseViewer):
@@ -117,7 +118,7 @@ class BCDataVisualizer(ArmBaseViewer):
 
 
 if __name__ == '__main__':
-    SCENE_XML_PATH = str(ROOT_DIR / 'model/franka_emika_panda/scene_pos.xml')
+    SCENE_XML_PATH = PANDA_POS_SCENE_XML
     YAML_PATH = str(ROOT_DIR / 'config/target_pos.yaml')
     
     # 初始化可视化验证器

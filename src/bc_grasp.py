@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 from mujoco_viewer import ArmBaseViewer, ROOT_DIR
 from utils import *
+from xml_paths import PANDA_POS_SCENE_XML
 import time
 
 # ===================== 【关键】和训练完全一致的 BC 模型 =====================
@@ -145,7 +146,7 @@ class BCReachInfer(ArmBaseViewer):
         print("="*60)
 
 if __name__ == '__main__':
-    SCENE_XML_PATH = str(ROOT_DIR / 'model/franka_emika_panda/scene_pos.xml')
+    SCENE_XML_PATH = PANDA_POS_SCENE_XML
     MODEL_PATH = ROOT_DIR / 'artifacts/bc_reach/bc_reach_best_model.pth'
     
     robot = BCReachInfer(SCENE_XML_PATH, MODEL_PATH)

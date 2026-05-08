@@ -2,17 +2,10 @@ import cv2
 import mujoco
 import numpy as np
 
-from mujoco_viewer import ArmBaseViewer, ROOT_DIR
+from mujoco_viewer import ArmBaseViewer
 from utils import euler2rotmat, rot_to_quat
+from xml_paths import PANDA_PBVS_SCENE_XML
 
-
-KEY_NONE = -1
-KEY_LEFT = {81, 65361, 2424832}
-KEY_UP = {82, 65362, 2490368}
-KEY_RIGHT = {83, 65363, 2555904}
-KEY_DOWN = {84, 65364, 2621440}
-KEY_PAGE_UP = {65365, 2162688}
-KEY_PAGE_DOWN = {65366, 2228224}
 
 POSITION_TOLERANCE = 0.01
 ROTATION_TOLERANCE = 0.05
@@ -20,6 +13,26 @@ JOINT_SPEED_LIMIT = 0.6
 POSITION_GAIN = 1.5
 ROTATION_GAIN = 0.1
 DLS_DAMPING = 0.08
+INITIAL_POSE_KP = 2.0
+INITIAL_POSE_REACHED_THRESHOLD = 0.2
+
+
+def format_vec(vec, precision=4):
+    return np.array2string(
+        np.asarray(vec),
+        precision=precision,
+        suppress_small=True,
+        separator=", ",
+    )
+
+
+def format_mat(mat, precision=4):
+    return np.array2string(
+        np.asarray(mat),
+        precision=precision,
+        suppress_small=True,
+        separator=", ",
+    )
 
 
 def orientation_error(desired_quat, current_quat):
@@ -52,70 +65,55 @@ class ArmPBVS(ArmBaseViewer):
         self.box_qpos_adr = self.model.jnt_qposadr[self.box_joint_id]
         self.box_qvel_adr = self.model.jnt_dofadr[self.box_joint_id]
 
-        self.grasp_height = 0.18
-        self.box_move_step = 0.03
-        self.workspace_min = np.array([0.2, -0.5, 0.02], dtype=np.float64)
-        self.workspace_max = np.array([0.8, 0.5, 0.4], dtype=np.float64)
+        self.grasp_height = 0.38
+        self.reachable_min = np.array([0.30, -0.35, 0.03], dtype=np.float64)
+        self.reachable_max = np.array([0.65, 0.35, 0.12], dtype=np.float64)
         self.grasp_rot = euler2rotmat(np.pi, 0.0, 0.0)
         self.grasp_quat = np.asarray(rot_to_quat(self.grasp_rot), dtype=np.float64)
-        self.box_target_pos = None
+        self.rng = np.random.default_rng()
+        self.initial_q = np.array([0.0, 0.314, 0.0, -0.754, 0.0, 1.19, 0.0], dtype=np.float64)
+        self.reach_initial_pose = False
 
     def runBefore(self):
         super().runBefore()
         self.model.opt.gravity[:] = 0.0
         mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
-        self.box_target_pos = self.get_box_pos()
-        self.set_box_pos(self.box_target_pos)
+        self.reach_initial_pose = False
+        box_pos = self.sample_box_pos()
+        self.set_box_pos(box_pos)
         self.data.ctrl[:7] = 0.0
         if self.model.nu > 7:
             self.data.ctrl[7:] = 255
-        cv2.namedWindow(self.window_name)
+        # cv2.namedWindow(self.window_name)
         self.print_help()
+        print(f"[PBVS] random box pos: {box_pos.round(3)}")
+        print(
+            "[PBVS Init] 正在移动到初始位置，PBVS 尚未开始；"
+            f"target_q={format_vec(self.initial_q)}"
+        )
 
     def print_help(self):
         print("\nPBVS 方块抓取位姿控制")
-        print("请先点击/聚焦 OpenCV 图像窗口，再按以下按键")
-        print("方向键: 控制方块 X/Y 横移")
-        print("PageUp/PageDown 或 u/o: 控制方块 Z")
+        print("每次启动随机设置方块位置")
+        print("先移动到初始关节位置，到位后再开始 PBVS")
         print("目标位姿: 方块正上方 %.2fm，末端固定向下抓取姿态" % self.grasp_height)
         print("")
 
     def get_box_pos(self):
         return self.data.qpos[self.box_qpos_adr:self.box_qpos_adr + 3].copy()
 
+    def sample_box_pos(self):
+        return self.rng.uniform(self.reachable_min, self.reachable_max).astype(np.float64)
+
     def set_box_pos(self, pos):
-        pos = np.clip(np.asarray(pos, dtype=np.float64), self.workspace_min, self.workspace_max)
+        pos = np.clip(np.asarray(pos, dtype=np.float64), self.reachable_min, self.reachable_max)
         self.data.qpos[self.box_qpos_adr:self.box_qpos_adr + 3] = pos
         self.data.qpos[self.box_qpos_adr + 3:self.box_qpos_adr + 7] = [1.0, 0.0, 0.0, 0.0]
         self.data.qvel[self.box_qvel_adr:self.box_qvel_adr + 6] = 0.0
         mujoco.mj_forward(self.model, self.data)
 
-    def process_keyboard(self, key):
-        if key == KEY_NONE:
-            return
-
-        pos = self.box_target_pos.copy()
-        ascii_key = key & 0xFF
-
-        if key in KEY_LEFT:
-            pos[0] -= self.box_move_step
-        elif key in KEY_RIGHT:
-            pos[0] += self.box_move_step
-        elif key in KEY_UP:
-            pos[1] += self.box_move_step
-        elif key in KEY_DOWN:
-            pos[1] -= self.box_move_step
-        elif key in KEY_PAGE_UP or ascii_key == ord("u"):
-            pos[2] += self.box_move_step
-        elif key in KEY_PAGE_DOWN or ascii_key == ord("o"):
-            pos[2] -= self.box_move_step
-        else:
-            return
-
-        self.box_target_pos = np.clip(pos, self.workspace_min, self.workspace_max)
-
     def get_target_pose(self):
-        box_pos = self.box_target_pos
+        box_pos = self.get_box_pos()
         target_pos = box_pos + np.array([0.0, 0.0, self.grasp_height], dtype=np.float64)
         return target_pos, self.grasp_quat
 
@@ -131,6 +129,12 @@ class ArmPBVS(ArmBaseViewer):
         rot_err = orientation_error(target_quat, ee_quat)
         return pos_err, rot_err
 
+    def jacobian_condition_number(self, J):
+        singular_values = np.linalg.svd(J, compute_uv=False)
+        if singular_values[-1] <= np.finfo(np.float64).eps:
+            return np.inf
+        return singular_values[0] / singular_values[-1]
+
     def end_effector_jacobian(self):
         Jp = np.zeros((3, self.model.nv), dtype=np.float64)
         Jr = np.zeros((3, self.model.nv), dtype=np.float64)
@@ -144,11 +148,42 @@ class ArmPBVS(ArmBaseViewer):
         ):
             return np.zeros(7, dtype=np.float64)
 
-        twist = np.concatenate([-POSITION_GAIN * pos_err, ROTATION_GAIN * rot_err])
+        twist = np.concatenate([POSITION_GAIN * pos_err, ROTATION_GAIN * rot_err])
         J = self.end_effector_jacobian()
         damping_matrix = DLS_DAMPING * DLS_DAMPING * np.eye(6)
         q_dot = J.T @ np.linalg.solve(J @ J.T + damping_matrix, twist)
         return np.clip(q_dot, -JOINT_SPEED_LIMIT, JOINT_SPEED_LIMIT)
+
+    def move_to_initial_pose(self):
+        q = self.data.qpos[:7].copy()
+        q_err = self.initial_q - q
+        q_diff = np.linalg.norm(q_err)
+
+        self.data.ctrl[:7] = np.clip(
+            INITIAL_POSE_KP * q_err,
+            -JOINT_SPEED_LIMIT,
+            JOINT_SPEED_LIMIT,
+        )
+        if self.model.nu > 7:
+            self.data.ctrl[7:] = 255
+
+        self.print_counter += 1
+        if self.print_counter % 50 == 0:
+            print(
+                "\n[PBVS Init]\n"
+                "  正在移动到初始位置，PBVS 尚未开始\n"
+                f"  target_q: {format_vec(self.initial_q)}\n"
+                f"  current_q: {format_vec(q)}\n"
+                f"  q_err_norm: {q_diff:.4f}"
+            )
+
+        if q_diff >= INITIAL_POSE_REACHED_THRESHOLD:
+            return False
+
+        self.data.ctrl[:7] = 0.0
+        self.reach_initial_pose = True
+        print("\n[PBVS Init] 已到达初始位置，开始 PBVS 接近目标")
+        return True
 
     def draw_status(self, frame, pos_err, rot_err):
         box_pos = self.get_box_pos()
@@ -156,7 +191,6 @@ class ArmPBVS(ArmBaseViewer):
             f"box xyz: {box_pos[0]:.2f}, {box_pos[1]:.2f}, {box_pos[2]:.2f}",
             f"pos err: {np.linalg.norm(pos_err):.3f} m",
             f"rot err: {np.linalg.norm(rot_err):.3f} rad",
-            "focus this OpenCV window: arrows xy, PgUp/PgDn or u/o z",
         ]
         for i, text in enumerate(lines):
             cv2.putText(
@@ -169,15 +203,17 @@ class ArmPBVS(ArmBaseViewer):
                 2,
             )
 
-    def show_frame_and_process_key(self, pos_err, rot_err):
+    def show_frame(self, pos_err, rot_err):
         frame = self.get_camera_image(show=False)
         self.draw_status(frame, pos_err, rot_err)
         cv2.imshow(self.window_name, frame)
-        key = cv2.waitKeyEx(1)
-        self.process_keyboard(key)
+        cv2.waitKey(1)
 
     def runFunc(self):
-        self.set_box_pos(self.box_target_pos)
+        if not self.reach_initial_pose:
+            self.move_to_initial_pose()
+            return
+
         pos_err, rot_err = self.compute_pose_error()
         self.data.ctrl[:7] = self.compute_joint_velocity(pos_err, rot_err)
         if self.model.nu > 7:
@@ -185,18 +221,28 @@ class ArmPBVS(ArmBaseViewer):
 
         self.print_counter += 1
         if self.print_counter % 100 == 0:
+            target_pos, target_quat = self.get_target_pose()
+            ee_pos, ee_quat = self.get_ee_pose()
+            J = self.end_effector_jacobian()
+            jac_cond = self.jacobian_condition_number(J)
             print(
-                f"[PBVS] pos_err={np.linalg.norm(pos_err):.4f}m "
-                f"rot_err={np.linalg.norm(rot_err):.4f}rad "
-                f"box={self.get_box_pos()}"
+                "\n[PBVS]\n"
+                f"  box_pos: {format_vec(self.get_box_pos())}\n"
+                f"  target_pos: {format_vec(target_pos)}\n"
+                f"  target_quat: {format_vec(target_quat)}\n"
+                f"  ee_pos: {format_vec(ee_pos)}\n"
+                f"  ee_quat: {format_vec(ee_quat)}\n"
+                f"  pos_err: {format_vec(pos_err)} | norm={np.linalg.norm(pos_err):.4f} m\n"
+                f"  rot_err: {format_vec(rot_err)} | norm={np.linalg.norm(rot_err):.4f} rad\n"
+                f"  jacobian_cond: {jac_cond:.4f}\n"
+                f"  jacobian:\n{format_mat(J)}"
             )
 
-        self.show_frame_and_process_key(pos_err, rot_err)
-        self.set_box_pos(self.box_target_pos)
+        # self.show_frame(pos_err, rot_err)
 
 
 if __name__ == "__main__":
-    SCENE_XML_PATH = str(ROOT_DIR / "model/franka_emika_panda/panda_pbvs.xml")
+    SCENE_XML_PATH = PANDA_PBVS_SCENE_XML
 
     robot = ArmPBVS(SCENE_XML_PATH, SCENE_XML_PATH)
     robot.run_loop()

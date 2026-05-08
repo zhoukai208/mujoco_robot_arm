@@ -34,23 +34,20 @@ description](https://github.com/frankaemika/franka_ros/tree/develop/franka_descr
 9. Manually edited the MJCF to extract common properties into the `<default>` section.
 10. Added `<exclude>` clauses to prevent collisions between `link7` and `link8`.
 11. Manually designed collision geoms for the fingertips.
-12. Added position-controlled actuators for the arm.
+12. Added script-specific position, torque, velocity, and IBVS/intvelocity actuator variants for the arm.
 13. Added an equality constraint so that the left finger mimics the position of the right finger.
 14. Added a tendon to split the force equally between both fingers and a
     position actuator acting on this tendon.
-15. Added `scene.xml` which includes the robot, with a textured groundplane, skybox, and haze.
+15. Retained only the XML files used by `src` entry points and their include dependencies.
 
-### MJX
+## Retained XML
 
-A version of the Franka Emika Panda environment was created for MJX. Steps:
+- `scene_pos.xml` + `panda_pos.xml`: shared position-control scene for manual control, movement, grasping, and BC data/inference.
+- `scene_tau.xml` + `panda_tau.xml`: shared torque-control scene for impedance and admittance controllers.
+- `scene_with_apriltag.xml` + `panda_tag.xml` + `tag.xml`: IBVS scene with a controllable AprilTag target.
+- `panda_pbvs.xml` + `panda_vel.xml`: PBVS scene with velocity-control arm and `box_body`.
 
-1. Added `mjx_panda.xml`, forked from `panda.xml`.
-2. Added `mjx_scene.xml` and `mjx_single_cube.xml`, forked from `scene.xml`.
-3. Gripper collision geometries were modified to contain less geoms. A capsule collision geom was added to the hand.
-4. Solver parameters were tuned for performance.
-5. Actuator `kp` and `kv` were reduced for more stable simulation.
-6. Added a `site` to the gripper.
-7. Removed tendon and added position actuator for the gripper. Changed gripper `ctrlrange`.
+See `docs/franka_emika_panda_xml.md` for the script-to-XML mapping.
 
 ## License
 

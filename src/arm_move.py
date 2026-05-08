@@ -2,6 +2,7 @@ import yaml
 import numpy as np
 from mujoco_viewer import ArmBaseViewer, ROOT_DIR
 from utils import *
+from xml_paths import PANDA_POS_SCENE_XML
 
 
 class ArmMoveController(ArmBaseViewer):
@@ -73,7 +74,7 @@ class ArmMoveController(ArmBaseViewer):
             
             
 if __name__ == '__main__':
-    SCENE_XML_PATH = str(ROOT_DIR / 'model/franka_emika_panda/scene_pos.xml')
+    SCENE_XML_PATH = PANDA_POS_SCENE_XML
     YAML_PATH = str(ROOT_DIR / 'config/target_pos.yaml')
         
     robot = ArmMoveController(SCENE_XML_PATH, YAML_PATH, YAML_PATH)

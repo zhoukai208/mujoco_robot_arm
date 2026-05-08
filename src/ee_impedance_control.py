@@ -1,6 +1,7 @@
 import mujoco
 import numpy as np
-from mujoco_viewer import ArmBaseViewer, ROOT_DIR
+from mujoco_viewer import ArmBaseViewer
+from xml_paths import PANDA_TAU_SCENE_XML
 
 
 # ===================== 姿态误差 =====================
@@ -108,6 +109,6 @@ class EndEffectorImpedanceControlViewer(ArmBaseViewer):
         print("J:", J)
 
 if __name__ == '__main__':
-    SCENE_XML_PATH = str(ROOT_DIR / 'model/franka_emika_panda/scene_tau.xml')
+    SCENE_XML_PATH = PANDA_TAU_SCENE_XML
     robot = EndEffectorImpedanceControlViewer(SCENE_XML_PATH, SCENE_XML_PATH)
     robot.run_loop()

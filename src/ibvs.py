@@ -5,7 +5,8 @@ import mujoco
 import numpy as np
 from pupil_apriltags import Detector
 
-from mujoco_viewer import ArmBaseViewer, ROOT_DIR
+from mujoco_viewer import ArmBaseViewer
+from xml_paths import PANDA_IBVS_SCENE_XML
 
 
 TAG_IDS = (0, 1, 2, 3)
@@ -529,7 +530,7 @@ class ArmIBVS(ArmBaseViewer):
 
 
 if __name__ == "__main__":
-    SCENE_XML_PATH = str(ROOT_DIR / "model/franka_emika_panda/scene_with_apriltag.xml")
+    SCENE_XML_PATH = PANDA_IBVS_SCENE_XML
 
     robot = ArmIBVS(SCENE_XML_PATH, SCENE_XML_PATH)
     robot.run_loop()

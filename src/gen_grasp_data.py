@@ -5,10 +5,11 @@ import pickle
 from pathlib import Path
 from utils import euler2rotmat
 from pinocchio_kinematic import PandaKinematics
+from xml_paths import PANDA_POS_SCENE_XML
 
 # ===================== 固定配置 =====================
 ROOT_DIR = Path(__file__).resolve().parents[1]
-MODEL_XML_PATH = str(ROOT_DIR / "model/franka_emika_panda/scene_pos.xml")
+MODEL_XML_PATH = PANDA_POS_SCENE_XML
 ARTIFACTS_DIR = ROOT_DIR / "artifacts/bc_reach"
 SAVE_PATH = ARTIFACTS_DIR / "bc_reach_dataset.pkl"
 MAX_COLLECT = 5000  # 数据量
