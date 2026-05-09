@@ -1,7 +1,7 @@
 <mujoco model="panda peg-in-hole assembly">
-  <include file="../../model/franka_emika_panda/panda_vel.xml"/>
+  <include file="../../model/franka_emika_panda/panda_pos.xml"/>
 
-  <statistic center="0.4 0 0.35" extent="1.0"/>
+  <statistic center="0.42 0 0.35" extent="1.0"/>
 
   <visual>
     <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
@@ -14,13 +14,31 @@
     <texture type="2d" name="groundplane" builtin="checker" mark="edge"
       rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
       width="300" height="300"/>
+
+    <texture type="2d" name="apriltag_0_tex" file="../../model/misc/textures/tag36h11_0.png"/>
+    <texture type="2d" name="apriltag_1_tex" file="../../model/misc/textures/tag36h11_1.png"/>
+    <texture type="2d" name="apriltag_2_tex" file="../../model/misc/textures/tag36h11_2.png"/>
+    <texture type="2d" name="apriltag_3_tex" file="../../model/misc/textures/tag36h11_3.png"/>
+
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
-    <material name="peg_mat" rgba="0.85 0.86 0.82 1" specular="0.6" shininess="0.35"/>
-    <material name="base_mat" rgba="0.26 0.30 0.33 1" specular="0.25" shininess="0.15"/>
-    <material name="hole_wall_mat" rgba="0.10 0.12 0.14 1" specular="0.2" shininess="0.1"/>
-    <material name="chamfer_mat" rgba="0.42 0.47 0.50 1" specular="0.35" shininess="0.2"/>
-    <material name="feature_blue" rgba="0.1 0.35 1.0 1"/>
-    <material name="feature_green" rgba="0.1 0.8 0.3 1"/>
+    <material name="hole_base_mat" rgba="0.62 0.64 0.66 1" specular="0.35" shininess="0.2"/>
+    <material name="peg_pin_mat" rgba="0.86 0.84 0.78 1" specular="0.55" shininess="0.35"/>
+    <material name="peg_holder_mat" rgba="0.22 0.24 0.26 1" specular="0.2" shininess="0.1"/>
+    <material name="collision_debug_mat" rgba="0.15 0.2 0.25 0"/>
+    <material name="tag_board_white" rgba="1 1 1 1" specular="0.1" shininess="0.1"/>
+    <material name="apriltag_0_mat" texture="apriltag_0_tex" texuniform="true" specular="0" shininess="0"/>
+    <material name="apriltag_1_mat" texture="apriltag_1_tex" texuniform="true" specular="0" shininess="0"/>
+    <material name="apriltag_2_mat" texture="apriltag_2_tex" texuniform="true" specular="0" shininess="0"/>
+    <material name="apriltag_3_mat" texture="apriltag_3_tex" texuniform="true" specular="0" shininess="0"/>
+
+    <mesh name="hole_base_visual_mesh" file="assets/hole_base_visual.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="peg_pin_visual_mesh" file="assets/peg_pin_visual.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="apriltag_square_100"
+      vertex="-0.05 -0.05 -0.00005  0.05 -0.05 -0.00005  0.05 0.05 -0.00005  -0.05 0.05 -0.00005
+              -0.05 -0.05 0.00005  0.05 -0.05 0.00005  0.05 0.05 0.00005  -0.05 0.05 0.00005"
+      texcoord="0 0  1 0  1 1  0 1  1 0  0 0  0 1  1 1"
+      face="0 2 1  0 3 2  4 5 6  4 6 7  0 1 5  0 5 4
+            1 2 6  1 6 5  2 3 7  2 7 6  3 0 4  3 4 7"/>
   </asset>
 
   <worldbody>
@@ -33,58 +51,106 @@
       <geom name="world_z" type="cylinder" size="0.004" fromto="0 0 0 0 0 0.3" rgba="0 0 1 1" contype="0" conaffinity="0"/>
     </body>
 
-    <body name="peg_body" pos="0.38 -0.24 0.085" quat="1 0 0 0">
+    <body name="peg_body" pos="0.5 -0.24 0.05" quat="1 0 0 0">
       <freejoint name="peg_freejoint"/>
-      <geom name="peg_geom" type="cylinder" size="0.012 0.075" material="peg_mat"
-        mass="0.05" solref="0.003 1" solimp="0.98 0.995 0.001" friction="1.2 0.02 0.002"/>
+      <geom name="peg_visual" type="mesh" mesh="peg_pin_visual_mesh" material="peg_pin_mat"
+        pos="0 0 -0.11" contype="0" conaffinity="0"/>
+      <geom name="peg_collision" type="cylinder" size="0.015 0.05" pos="0 0 0"
+        mass="0.02" solref="0.003 1" solimp="0.98 0.995 0.001" friction="4.0 0.1 0.01"/>
       <site name="peg_center_site" pos="0 0 0" size="0.006" rgba="0 0.8 1 1"/>
-      <site name="peg_top_site" pos="0 0 0.075" size="0.005" rgba="0 0.8 1 1"/>
-      <site name="peg_bottom_site" pos="0 0 -0.075" size="0.005" rgba="0 0.8 1 1"/>
-      <site name="peg_grasp_site" pos="0 0 0.025" size="0.007" rgba="1 0.8 0 1"/>
-      <geom name="peg_top_feature" type="cylinder" size="0.0125 0.001" pos="0 0 0.076"
-        material="feature_blue" contype="0" conaffinity="0"/>
+      <site name="peg_top_site" pos="0 0 0.05" size="0.005" rgba="0 0.8 1 1"/>
+      <site name="peg_bottom_site" pos="0 0 -0.05" size="0.005" rgba="0 0.8 1 1"/>
+      <site name="peg_grasp_site" pos="0 0 0.02" size="0.007" rgba="1 0.8 0 1"/>
     </body>
 
-    <body name="hole_base" pos="0.55 0.20 0.04" quat="1 0 0 0">
-      <site name="hole_center_site" pos="0 0 0.04" size="0.006" rgba="0.1 1 0.1 1"/>
-      <site name="hole_approach_site" pos="0 0 0.18" size="0.007" rgba="0.1 1 0.1 1"/>
-      <site name="hole_insert_depth_site" pos="0 0 -0.015" size="0.005" rgba="1 0.2 0.2 1"/>
+    <body name="peg_holder" pos="0.58 -0.34 0">
+      <geom name="peg_holder_east" type="box" size="0.003 0.024 0.012" pos="0.020 0 0.012"
+        material="peg_holder_mat" friction="0.2 0.001 0.0001"/>
+      <geom name="peg_holder_west" type="box" size="0.003 0.024 0.012" pos="-0.020 0 0.012"
+        material="peg_holder_mat" friction="0.2 0.001 0.0001"/>
+      <geom name="peg_holder_north" type="box" size="0.024 0.003 0.012" pos="0 0.020 0.012"
+        material="peg_holder_mat" friction="0.2 0.001 0.0001"/>
+      <geom name="peg_holder_south" type="box" size="0.024 0.003 0.012" pos="0 -0.020 0.012"
+        material="peg_holder_mat" friction="0.2 0.001 0.0001"/>
+    </body>
 
-      <geom name="base_left_block" type="box" size="0.045 0.12 0.04" pos="-0.075 0 0" material="base_mat"/>
-      <geom name="base_right_block" type="box" size="0.045 0.12 0.04" pos="0.075 0 0" material="base_mat"/>
-      <geom name="base_front_block" type="box" size="0.030 0.045 0.04" pos="0 -0.075 0" material="base_mat"/>
-      <geom name="base_back_block" type="box" size="0.030 0.045 0.04" pos="0 0.075 0" material="base_mat"/>
+    <body name="hole_base" pos="0.55 0.20 0.0" quat="1 0 0 0">
+      <geom name="hole_base_visual" type="mesh" mesh="hole_base_visual_mesh" material="hole_base_mat"
+        contype="0" conaffinity="0"/>
 
-      <geom name="hole_wall_east" type="box" size="0.003 0.012 0.035" pos="0.022 0 -0.002" material="hole_wall_mat"/>
-      <geom name="hole_wall_west" type="box" size="0.003 0.012 0.035" pos="-0.022 0 -0.002" material="hole_wall_mat"/>
-      <geom name="hole_wall_north" type="box" size="0.012 0.003 0.035" pos="0 0.022 -0.002" material="hole_wall_mat"/>
-      <geom name="hole_wall_south" type="box" size="0.012 0.003 0.035" pos="0 -0.022 -0.002" material="hole_wall_mat"/>
-      <geom name="hole_wall_ne" type="box" size="0.003 0.011 0.035" pos="0.0156 0.0156 -0.002"
-        euler="0 0 -0.785398" material="hole_wall_mat"/>
-      <geom name="hole_wall_nw" type="box" size="0.003 0.011 0.035" pos="-0.0156 0.0156 -0.002"
-        euler="0 0 0.785398" material="hole_wall_mat"/>
-      <geom name="hole_wall_sw" type="box" size="0.003 0.011 0.035" pos="-0.0156 -0.0156 -0.002"
-        euler="0 0 -0.785398" material="hole_wall_mat"/>
-      <geom name="hole_wall_se" type="box" size="0.003 0.011 0.035" pos="0.0156 -0.0156 -0.002"
-        euler="0 0 0.785398" material="hole_wall_mat"/>
+      <site name="hole_center_site" pos="0 0 0.06" size="0.006" rgba="0.1 1 0.1 1"/>
+      <site name="hole_approach_site" pos="0 0 0.20" size="0.007" rgba="0.1 1 0.1 1"/>
+      <site name="hole_insert_depth_site" pos="0 0 0.015" size="0.005" rgba="1 0.2 0.2 1"/>
 
-      <geom name="hole_chamfer_east" type="box" size="0.006 0.034 0.003" pos="0.032 0 0.042"
-        euler="0 0.50 0" material="chamfer_mat"/>
-      <geom name="hole_chamfer_west" type="box" size="0.006 0.034 0.003" pos="-0.032 0 0.042"
-        euler="0 -0.50 0" material="chamfer_mat"/>
-      <geom name="hole_chamfer_north" type="box" size="0.034 0.006 0.003" pos="0 0.032 0.042"
-        euler="-0.50 0 0" material="chamfer_mat"/>
-      <geom name="hole_chamfer_south" type="box" size="0.034 0.006 0.003" pos="0 -0.032 0.042"
-        euler="0.50 0 0" material="chamfer_mat"/>
+      <geom name="hole_plate_collision_left" type="box" size="0.045 0.125 0.030" pos="-0.080 0 0.030"
+        material="collision_debug_mat"/>
+      <geom name="hole_plate_collision_right" type="box" size="0.045 0.125 0.030" pos="0.080 0 0.030"
+        material="collision_debug_mat"/>
+      <geom name="hole_plate_collision_front" type="box" size="0.035 0.045 0.030" pos="0 -0.080 0.030"
+        material="collision_debug_mat"/>
+      <geom name="hole_plate_collision_back" type="box" size="0.035 0.045 0.030" pos="0 0.080 0.030"
+        material="collision_debug_mat"/>
+
+      <geom name="hole_inner_wall_east" type="box" size="0.003 0.015 0.022" pos="0.0185 0 0.032"
+        material="collision_debug_mat"/>
+      <geom name="hole_inner_wall_west" type="box" size="0.003 0.015 0.022" pos="-0.0185 0 0.032"
+        material="collision_debug_mat"/>
+      <geom name="hole_inner_wall_north" type="box" size="0.015 0.003 0.022" pos="0 0.0185 0.032"
+        material="collision_debug_mat"/>
+      <geom name="hole_inner_wall_south" type="box" size="0.015 0.003 0.022" pos="0 -0.0185 0.032"
+        material="collision_debug_mat"/>
+      <geom name="hole_inner_wall_ne" type="box" size="0.003 0.012 0.022" pos="0.013 0.013 0.032"
+        euler="0 0 -0.785398" material="collision_debug_mat"/>
+      <geom name="hole_inner_wall_nw" type="box" size="0.003 0.012 0.022" pos="-0.013 0.013 0.032"
+        euler="0 0 0.785398" material="collision_debug_mat"/>
+      <geom name="hole_inner_wall_sw" type="box" size="0.003 0.012 0.022" pos="-0.013 -0.013 0.032"
+        euler="0 0 -0.785398" material="collision_debug_mat"/>
+      <geom name="hole_inner_wall_se" type="box" size="0.003 0.012 0.022" pos="0.013 -0.013 0.032"
+        euler="0 0 0.785398" material="collision_debug_mat"/>
+
+      <geom name="hole_chamfer_collision_east" type="box" size="0.004 0.026 0.003" pos="0.026 0 0.060"
+        euler="0 0.55 0" material="collision_debug_mat"/>
+      <geom name="hole_chamfer_collision_west" type="box" size="0.004 0.026 0.003" pos="-0.026 0 0.060"
+        euler="0 -0.55 0" material="collision_debug_mat"/>
+      <geom name="hole_chamfer_collision_north" type="box" size="0.026 0.004 0.003" pos="0 0.026 0.060"
+        euler="-0.55 0 0" material="collision_debug_mat"/>
+      <geom name="hole_chamfer_collision_south" type="box" size="0.026 0.004 0.003" pos="0 -0.026 0.060"
+        euler="0.55 0 0" material="collision_debug_mat"/>
+
+      <body name="hole_tag_0" pos="-0.075 0.075 0.0105">
+        <geom name="tag_board_0" type="box" size="0.05 0.05 0.0005" material="tag_board_white" contype="0" conaffinity="0"/>
+        <geom name="apriltag_0" type="mesh" mesh="apriltag_square_100" pos="0 0 0.00055"
+          material="apriltag_0_mat" contype="0" conaffinity="0"/>
+      </body>
+      <body name="hole_tag_1" pos="0.075 0.075 0.0105">
+        <geom name="tag_board_1" type="box" size="0.05 0.05 0.0005" material="tag_board_white" contype="0" conaffinity="0"/>
+        <geom name="apriltag_1" type="mesh" mesh="apriltag_square_100" pos="0 0 0.00055"
+          material="apriltag_1_mat" contype="0" conaffinity="0"/>
+      </body>
+      <body name="hole_tag_2" pos="0.075 -0.075 0.0105">
+        <geom name="tag_board_2" type="box" size="0.05 0.05 0.0005" material="tag_board_white" contype="0" conaffinity="0"/>
+        <geom name="apriltag_2" type="mesh" mesh="apriltag_square_100" pos="0 0 0.00055"
+          material="apriltag_2_mat" contype="0" conaffinity="0"/>
+      </body>
+      <body name="hole_tag_3" pos="-0.075 -0.075 0.0105">
+        <geom name="tag_board_3" type="box" size="0.05 0.05 0.0005" material="tag_board_white" contype="0" conaffinity="0"/>
+        <geom name="apriltag_3" type="mesh" mesh="apriltag_square_100" pos="0 0 0.00055"
+          material="apriltag_3_mat" contype="0" conaffinity="0"/>
+      </body>
     </body>
   </worldbody>
+
+  <equality>
+    <weld name="peg_grasp_weld" body1="ee_center_body" body2="peg_body" active="false"
+      solref="0.002 1" solimp="0.95 0.99 0.001"/>
+  </equality>
 
   <keyframe>
     <key name="home"
       qpos="
       0 0 0 -1.57079 0 3.0 -1.7853 0.04 0.04
-      0.38 -0.24 0.085 1 0 0 0
+      0.58 -0.34 0.05 1 0 0 0
       "
-      ctrl="0 0 0 0 0 0 0 255"/>
+      ctrl="0 0 0 -1.57079 0 3.0 -1.7853 255"/>
   </keyframe>
 </mujoco>

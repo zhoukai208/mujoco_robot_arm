@@ -10,8 +10,12 @@ import mujoco.viewer
 SCENE_XML = Path(__file__).resolve().with_name("scene.xml")
 ROOT_DIR = Path(__file__).resolve().parents[2]
 PANDA_MODEL_DIR = ROOT_DIR / "model/franka_emika_panda"
-PANDA_INCLUDE_FROM_SRC = "../../model/franka_emika_panda/panda_vel.xml"
-PANDA_INCLUDE_FROM_MODEL_DIR = "panda_vel.xml"
+PROJECT_ASSETS_DIR = ROOT_DIR / "src/peg_in_hole/assets"
+TAG_TEXTURES_DIR = ROOT_DIR / "model/misc/textures"
+PANDA_INCLUDE_FROM_SRC = "../../model/franka_emika_panda/panda_pos.xml"
+PANDA_INCLUDE_FROM_MODEL_DIR = "panda_pos.xml"
+PROJECT_ASSETS_FROM_SRC = 'file="assets/'
+TAG_TEXTURES_FROM_SRC = "../../model/misc/textures/"
 
 
 def parse_args():
@@ -31,6 +35,11 @@ def make_loadable_scene_xml():
         f'<include file="{PANDA_INCLUDE_FROM_SRC}"/>',
         f'<include file="{PANDA_INCLUDE_FROM_MODEL_DIR}"/>',
     )
+    scene_text = scene_text.replace(
+        PROJECT_ASSETS_FROM_SRC,
+        f'file="{PROJECT_ASSETS_DIR.as_posix()}/',
+    )
+    scene_text = scene_text.replace(TAG_TEXTURES_FROM_SRC, f"{TAG_TEXTURES_DIR.as_posix()}/")
 
     temp_file = tempfile.NamedTemporaryFile(
         mode="w",
