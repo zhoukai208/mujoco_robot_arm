@@ -3,8 +3,11 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 
+import cv2
 import mujoco
 import numpy as np
+import yaml
+from pupil_apriltags import Detector
 
 SRC_DIR = Path(__file__).resolve().parents[1]
 if str(SRC_DIR) not in sys.path:
@@ -13,7 +16,10 @@ if str(SRC_DIR) not in sys.path:
 from mujoco_viewer import ArmBaseViewer
 from utils import euler2rotmat
 
-from view_scene import make_loadable_scene_xml
+try:
+    from .view_scene import make_loadable_scene_xml
+except ImportError:
+    from view_scene import make_loadable_scene_xml
 
 JOINT_REACHED_TOL = 0.008
 GRIPPER_OPEN = 255
@@ -22,12 +28,14 @@ GRIPPER_CLOSE_MIN_STEPS = 180
 GRIPPER_CLOSE_TIMEOUT_STEPS = 500
 APPROACH_STEPS_DOWN = 35
 DESCEND_STEPS = 45
-INSERT_STEPS = 35
-RELEASE_STEPS = 120
 PATH_WAYPOINT_TOL = 0.006
 
 APPROACH_CLEARANCE = 0.14
 SAFE_APPROACH_CLEARANCE = 0.28
+HOLE_OBSERVATION_EXTRA_HEIGHT = 0.12
+CAMERA_CLOCKWISE_YAW_OFFSET = -np.deg2rad(45.0)
+TAG_IDS = (0, 1, 2, 3)
+IBVS_TARGET_PIXELS_PATH = Path(__file__).resolve().parents[2] / "config/peg_in_hole_ibvs_target_pixels.yaml"
 
 
 class GraspState(Enum):
@@ -36,8 +44,7 @@ class GraspState(Enum):
     DESCEND = auto()
     CLOSE_GRIPPER = auto()
     LIFT = auto()
-    INSERT = auto()
-    RELEASE = auto()
+    RECORD_IBVS_TARGET = auto()
     DONE = auto()
 
 
@@ -165,8 +172,14 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         self.approach_q_path = []
         self.descend_q_path = []
         self.lift_q_path = []
-        self.insert_q_path = []
-        self.grasp_rot = euler2rotmat(np.pi, 0.0, 0.0)
+        self.grasp_rot = euler2rotmat(np.pi, 0.0, CAMERA_CLOCKWISE_YAW_OFFSET)
+        self.ibvs_target_pixels = None
+        self.tag_detector = Detector(
+            families="tag36h11",
+            nthreads=2,
+            quad_decimate=1.0,
+            refine_edges=1,
+        )
         self.arm_controller = PositionArmController(
             self.model,
             self.data,
@@ -175,20 +188,13 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         self.approach_follower = PositionJointPathFollower(self.arm_controller, PATH_WAYPOINT_TOL)
         self.descend_follower = PositionJointPathFollower(self.arm_controller, PATH_WAYPOINT_TOL)
         self.lift_follower = PositionJointPathFollower(self.arm_controller, PATH_WAYPOINT_TOL)
-        self.insert_follower = PositionJointPathFollower(self.arm_controller, PATH_WAYPOINT_TOL)
         self.peg_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "peg_body")
         self.peg_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "peg_collision")
         self.peg_grasp_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "peg_grasp_site")
-        self.peg_bottom_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "peg_bottom_site")
         self.hole_approach_site_id = mujoco.mj_name2id(
             self.model,
             mujoco.mjtObj.mjOBJ_SITE,
             "hole_approach_site",
-        )
-        self.hole_insert_depth_site_id = mujoco.mj_name2id(
-            self.model,
-            mujoco.mjtObj.mjOBJ_SITE,
-            "hole_insert_depth_site",
         )
         self.grasp_weld_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_EQUALITY, "peg_grasp_weld")
         self.left_finger_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "left_finger")
@@ -210,21 +216,21 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         if self.grasp_weld_id >= 0:
             self.data.eq_active[self.grasp_weld_id] = 0
         mujoco.mj_forward(self.model, self.data)
-        print("[GraspDemo] start with position control: plan -> grasp -> move above hole -> insert -> release")
+        print("[GraspDemo] start with position control: plan -> grasp -> move high above hole -> record IBVS target")
 
     def _make_pose_targets(self):
         mujoco.mj_forward(self.model, self.data)
         grasp = self.data.site_xpos[self.peg_grasp_site_id].copy()
-        peg_bottom = self.data.site_xpos[self.peg_bottom_site_id].copy()
         hole_approach = self.data.site_xpos[self.hole_approach_site_id].copy()
-        hole_insert_depth = self.data.site_xpos[self.hole_insert_depth_site_id].copy()
         above = grasp + np.array([0.0, 0.0, APPROACH_CLEARANCE], dtype=np.float64)
-        insert = hole_insert_depth - (peg_bottom - grasp)
+        high_above_hole = hole_approach + np.array(
+            [0.0, 0.0, HOLE_OBSERVATION_EXTRA_HEIGHT],
+            dtype=np.float64,
+        )
         return {
             GraspState.MOVE_ABOVE_PIN: above,
             GraspState.DESCEND: grasp,
-            GraspState.LIFT: hole_approach,
-            GraspState.INSERT: insert,
+            GraspState.LIFT: high_above_hole,
         }
 
     def _plan_targets(self):
@@ -258,12 +264,6 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             [pose_targets[GraspState.DESCEND], pose_targets[GraspState.LIFT]],
             self.descend_q_path[-1],
             [DESCEND_STEPS],
-        )
-        self.insert_q_path = self._plan_cartesian_path(
-            "INSERT",
-            [pose_targets[GraspState.LIFT], pose_targets[GraspState.INSERT]],
-            self.lift_q_path[-1],
-            [INSERT_STEPS],
         )
         self._set_state(GraspState.MOVE_ABOVE_PIN)
 
@@ -307,21 +307,14 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         if state == GraspState.LIFT:
             self.lift_follower.start(self.lift_q_path)
             print(
-                "[GraspDemo] move above hole start: "
+                "[GraspDemo] move high above hole start: "
                 f"from={format_vec(self.pose_targets[GraspState.DESCEND])} "
                 f"to={format_vec(self.pose_targets[GraspState.LIFT])}"
             )
-        if state == GraspState.INSERT:
-            self.insert_follower.start(self.insert_q_path)
-            print(
-                "[GraspDemo] insert start: "
-                f"from={format_vec(self.pose_targets[GraspState.LIFT])} "
-                f"to={format_vec(self.pose_targets[GraspState.INSERT])}"
-            )
-        if state == GraspState.RELEASE:
-            print("[GraspDemo] release gripper and disable grasp weld")
+        if state == GraspState.RECORD_IBVS_TARGET:
+            print("[GraspDemo] record AprilTag pixel centers for IBVS")
         if state == GraspState.DONE:
-            print("[GraspDemo] insertion complete: holding final pose with gripper open")
+            print("[GraspDemo] IBVS target recorded: holding high above hole with gripper closed")
         print(f"[GraspDemo] state -> {state.name}")
 
     def _servo_to_joint_target(self, q_target, reached_tol):
@@ -353,7 +346,12 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         return done
 
     def _gripper_command_for_state(self):
-        if self.state in (GraspState.CLOSE_GRIPPER, GraspState.LIFT, GraspState.INSERT):
+        if self.state in (
+            GraspState.CLOSE_GRIPPER,
+            GraspState.LIFT,
+            GraspState.RECORD_IBVS_TARGET,
+            GraspState.DONE,
+        ):
             return GRIPPER_CLOSE
         return GRIPPER_OPEN
 
@@ -405,23 +403,6 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             f"rel_pos={format_vec(rel_pos)} rel_quat={format_vec(rel_quat)}"
         )
 
-    def _release_grasp(self):
-        self._servo_to_joint_target(self.insert_q_path[-1], JOINT_REACHED_TOL)
-        self.arm_controller.set_gripper(GRIPPER_OPEN)
-        if self.grasp_weld_id >= 0:
-            self.data.eq_active[self.grasp_weld_id] = 0
-
-        self.state_step += 1
-        if self.print_counter % 50 == 0 or self.state_step == 1:
-            print(
-                "[GraspDemo] releasing peg "
-                f"step={self.state_step} "
-                f"peg_pos={format_vec(self.data.xpos[self.peg_body_id])}"
-            )
-
-        if self.state_step >= RELEASE_STEPS:
-            self._set_state(GraspState.DONE)
-
     def _finger_contacts_with_pin(self):
         left_contact = False
         right_contact = False
@@ -444,7 +425,52 @@ class PegInHoleGraspDemo(ArmBaseViewer):
     def _get_ee_pose(self):
         return self.data.body(self.ee_id).xpos.copy(), self.data.body(self.ee_id).xquat.copy()
 
+    def _record_ibvs_target_pixels(self, frame):
+        self._servo_to_joint_target(self.lift_q_path[-1], JOINT_REACHED_TOL)
+        if frame is None:
+            return
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        detections = self.tag_detector.detect(gray)
+        detections_by_id = {
+            int(det.tag_id): det
+            for det in detections
+            if int(det.tag_id) in TAG_IDS
+        }
+        missing_ids = [tag_id for tag_id in TAG_IDS if tag_id not in detections_by_id]
+        if missing_ids:
+            if self.print_counter % 20 == 0:
+                print(
+                    "[GraspDemo] waiting for AprilTag detections "
+                    f"detected={sorted(detections_by_id)} missing={missing_ids}"
+                )
+            return
+
+        self.ibvs_target_pixels = {
+            tag_id: detections_by_id[tag_id].center.astype(float).tolist()
+            for tag_id in TAG_IDS
+        }
+        payload = {
+            "camera": self.camera_name,
+            "image_width": int(self.width),
+            "image_height": int(self.height),
+            "tag_pixels": self.ibvs_target_pixels,
+            "ee_pos": self.data.body(self.ee_id).xpos.astype(float).tolist(),
+            "peg_pos": self.data.xpos[self.peg_body_id].astype(float).tolist(),
+            "hole_observation_pos": self.pose_targets[GraspState.LIFT].astype(float).tolist(),
+        }
+        IBVS_TARGET_PIXELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with IBVS_TARGET_PIXELS_PATH.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(payload, f, sort_keys=False)
+
+        print(f"[GraspDemo] saved IBVS target pixels to {IBVS_TARGET_PIXELS_PATH}")
+        for tag_id, center in self.ibvs_target_pixels.items():
+            print(f"[GraspDemo] tag {tag_id}: u={center[0]:.1f}, v={center[1]:.1f}")
+        self._set_state(GraspState.DONE)
+
     def runFunc(self):
+        frame = self.get_camera_image(show=True)
+
         if self.state == GraspState.PLAN:
             self._plan_targets()
         elif self.state == GraspState.MOVE_ABOVE_PIN:
@@ -457,18 +483,13 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             self._close_gripper_until_contact()
         elif self.state == GraspState.LIFT:
             if self._follow_joint_path("LIFT_LINEAR", self.lift_follower, include_pin=True):
-                self._set_state(GraspState.INSERT)
-        elif self.state == GraspState.INSERT:
-            if self._follow_joint_path("INSERT_LINEAR", self.insert_follower, include_pin=True):
-                self._set_state(GraspState.RELEASE)
-        elif self.state == GraspState.RELEASE:
-            self._release_grasp()
+                self._set_state(GraspState.RECORD_IBVS_TARGET)
+        elif self.state == GraspState.RECORD_IBVS_TARGET:
+            self._record_ibvs_target_pixels(frame)
         elif self.state == GraspState.DONE:
-            self._servo_to_joint_target(self.insert_q_path[-1], JOINT_REACHED_TOL)
+            self._servo_to_joint_target(self.lift_q_path[-1], JOINT_REACHED_TOL)
 
         self.print_counter += 1
-        
-        frame = self.get_camera_image(show=True)
 
 
 def main():
