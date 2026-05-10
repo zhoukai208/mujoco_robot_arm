@@ -1,5 +1,5 @@
 <mujoco model="panda peg-in-hole assembly">
-  <include file="../../model/franka_emika_panda/panda_pos.xml"/>
+  <include file="panda_pos.xml"/>
 
   <statistic center="0.42 0 0.35" extent="1.0"/>
 
@@ -15,10 +15,10 @@
       rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
       width="300" height="300"/>
 
-    <texture type="2d" name="apriltag_0_tex" file="../../model/misc/textures/tag36h11_0.png"/>
-    <texture type="2d" name="apriltag_1_tex" file="../../model/misc/textures/tag36h11_1.png"/>
-    <texture type="2d" name="apriltag_2_tex" file="../../model/misc/textures/tag36h11_2.png"/>
-    <texture type="2d" name="apriltag_3_tex" file="../../model/misc/textures/tag36h11_3.png"/>
+    <texture type="2d" name="apriltag_0_tex" file="/home/ethan/work/mujoco-learning-main/model/misc/textures/tag36h11_0.png"/>
+    <texture type="2d" name="apriltag_1_tex" file="/home/ethan/work/mujoco-learning-main/model/misc/textures/tag36h11_1.png"/>
+    <texture type="2d" name="apriltag_2_tex" file="/home/ethan/work/mujoco-learning-main/model/misc/textures/tag36h11_2.png"/>
+    <texture type="2d" name="apriltag_3_tex" file="/home/ethan/work/mujoco-learning-main/model/misc/textures/tag36h11_3.png"/>
 
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
     <material name="hole_base_mat" rgba="0.62 0.64 0.66 1" specular="0.35" shininess="0.2"/>
@@ -31,8 +31,8 @@
     <material name="apriltag_2_mat" texture="apriltag_2_tex" texuniform="true" specular="0" shininess="0"/>
     <material name="apriltag_3_mat" texture="apriltag_3_tex" texuniform="true" specular="0" shininess="0"/>
 
-    <mesh name="hole_base_visual_mesh" file="assets/hole_base_visual.stl" scale="0.001 0.001 0.001"/>
-    <mesh name="peg_pin_visual_mesh" file="assets/peg_pin_visual.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hole_base_visual_mesh" file="/home/ethan/work/mujoco-learning-main/src/peg_in_hole/assets/hole_base_visual.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="peg_pin_visual_mesh" file="/home/ethan/work/mujoco-learning-main/src/peg_in_hole/assets/peg_pin_visual.stl" scale="0.001 0.001 0.001"/>
     <mesh name="apriltag_square_100"
       vertex="-0.05 -0.05 -0.00005  0.05 -0.05 -0.00005  0.05 0.05 -0.00005  -0.05 0.05 -0.00005
               -0.05 -0.05 0.00005  0.05 -0.05 0.00005  0.05 0.05 0.00005  -0.05 0.05 0.00005"

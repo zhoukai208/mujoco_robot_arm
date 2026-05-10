@@ -35,3 +35,6 @@ kdl_parser
 pinocchio_install
 */.git
 urdf2mjcf
+/scripts/*
+!/scripts/install_pinocchio.sh
+!/scripts/install_pykdl.sh

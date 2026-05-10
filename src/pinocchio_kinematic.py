@@ -73,7 +73,8 @@ class PandaKinematics:
             i += 1
 
         if success:
-            print("✅ IK 收敛成功！")
+            # print("✅ IK 收敛成功！")
+            pass
         else:
             print("❌ IK 未收敛")
         

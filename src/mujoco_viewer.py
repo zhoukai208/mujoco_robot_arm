@@ -14,6 +14,11 @@ ROOT_DIR = Path(__file__).parent.parent.resolve()
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 
+CAMERA_WINDOW_NAME = "MuJoCo Camera Output"
+CAMERA_WINDOW_POS = (20, 40)
+CAMERA_WINDOW_SIZE = (640, 480)
+
+
 class CustomViewer:
     def __init__(self, model_path, distance=3, azimuth=0, elevation=-30):
         self.model_path = model_path
@@ -31,6 +36,14 @@ class CustomViewer:
 
     def sync(self):
         self.handle.sync()
+
+    def position_windows(self):
+        try:
+            cv2.namedWindow(CAMERA_WINDOW_NAME, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(CAMERA_WINDOW_NAME, *CAMERA_WINDOW_SIZE)
+            cv2.moveWindow(CAMERA_WINDOW_NAME, *CAMERA_WINDOW_POS)
+        except cv2.error:
+            pass
 
     @property
     def cam(self):
@@ -253,7 +266,10 @@ class CustomViewer:
         mujoco.mjr_readPixels(rgb, None, viewport, self.context)
         bgr = cv2.cvtColor(np.flipud(rgb), cv2.COLOR_RGB2BGR)
         if show:
-            cv2.imshow('MuJoCo Camera Output', bgr)
+            cv2.namedWindow(CAMERA_WINDOW_NAME, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(CAMERA_WINDOW_NAME, *CAMERA_WINDOW_SIZE)
+            cv2.moveWindow(CAMERA_WINDOW_NAME, *CAMERA_WINDOW_POS)
+            cv2.imshow(CAMERA_WINDOW_NAME, bgr)
             cv2.waitKey(1)
         return bgr
 
@@ -282,12 +298,16 @@ class CustomViewer:
         mujoco.mjr_readPixels(rgb, None, viewport, self.context)
         bgr = cv2.cvtColor(np.flipud(rgb), cv2.COLOR_RGB2BGR)
         if show:
-            cv2.imshow('MuJoCo Camera Output', bgr)
+            cv2.namedWindow(CAMERA_WINDOW_NAME, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(CAMERA_WINDOW_NAME, *CAMERA_WINDOW_SIZE)
+            cv2.moveWindow(CAMERA_WINDOW_NAME, *CAMERA_WINDOW_POS)
+            cv2.imshow(CAMERA_WINDOW_NAME, bgr)
             cv2.waitKey(1)
         return bgr
 
     def run_loop(self):
         self.handle = mujoco.viewer.launch_passive(self.model, self.data)
+        self.position_windows()
         self.handle.cam.distance = self.distance
         self.handle.cam.azimuth = self.azimuth
         self.handle.cam.elevation = self.elevation
