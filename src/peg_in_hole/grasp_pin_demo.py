@@ -31,22 +31,33 @@ APPROACH_STEPS_DOWN = 35
 DESCEND_STEPS = 45
 PATH_WAYPOINT_TOL = 0.006
 POSITION_TARGET_TRACKING_LIMIT = 0.25
-IBVS_ALIGNED_THRESHOLD_PX = 12.0
+IBVS_ALIGNED_THRESHOLD_PX = 10.0
+ENABLE_IBVS = True
 INSERT_DESCEND_STEP = 0.001
 INSERT_MAX_DESCEND = 0.45
 RELEASE_OPEN_STEPS = 80
 INSERT_FORCE_THRESHOLD = 5.0
 INSERT_CONTACT_FORCE_THRESHOLD = 1.0
+INSERT_CONTACT_DESCEND_SCALE = 0.2
+ENABLE_INSERT_ADMITTANCE = True
 INSERT_DEPTH_Z_TOL = 0.006
-INSERT_DEPTH_XY_TOL = 0.025
+INSERT_DEPTH_XY_TOL = 0.005
+INSERT_ADMITTANCE_M = np.array([0.5, 0.5], dtype=np.float64)
+INSERT_ADMITTANCE_D = np.array([20.0, 20.0], dtype=np.float64)
+INSERT_ADMITTANCE_K = np.array([10.0, 10.0], dtype=np.float64)
+INSERT_ADMITTANCE_MAX_OFFSET = 0.006
+INSERT_ADMITTANCE_MAX_VELOCITY = 0.03
+INSERT_ADMITTANCE_FORCE_SIGN = -1.0
 APPROACH_CLEARANCE = 0.14
 SAFE_APPROACH_CLEARANCE = 0.28
 HOLE_OBSERVATION_EXTRA_HEIGHT = 0.22
-HOLE_OBSERVATION_X_OFFSET = 0.0
-HOLE_OBSERVATION_Y_OFFSET = 0.0
-HOLE_OBSERVATION_RANDOM_X_RANGE = (-0.075, 0.145)
-HOLE_OBSERVATION_RANDOM_Y_RANGE = (-0.145, 0.145)
+HOLE_OBSERVATION_OFFSET_XY = np.array([0.0, 0.0], dtype=np.float64)
+HOLE_OBSERVATION_RANDOM_XY_RANGE = np.array(
+    [[-0.245, 0.075], [-0.145, 0.145]],
+    dtype=np.float64,
+)
 HOLE_APPROACH_LOCAL_Z = 0.20
+INSERT_TEST_OFFSET_XY = np.array([0.0, 0.01], dtype=np.float64)
 CAMERA_CLOCKWISE_YAW_OFFSET = -np.deg2rad(45.0)
 TAG_IDS = (0, 1, 2, 3)
 IBVS_TARGET_PIXELS_PATH = Path(__file__).resolve().parents[2] / "config/peg_in_hole_ibvs_target_pixels.yaml"
@@ -60,6 +71,7 @@ class GraspState(Enum):
     LIFT = auto()
     CHECK_IBVS_ERROR = auto()
     INSERT_DESCEND = auto()
+    INSERT_HOLD = auto()
     RELEASE_GRIPPER = auto()
     RETREAT_AFTER_RELEASE = auto()
     RETREAT_ABORT = auto()
@@ -203,7 +215,11 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         self.insert_start_pos = None
         self.insert_target_pos = None
         self.insert_force_bias = np.zeros(3, dtype=np.float64)
+        self.insert_admittance_offset_xy = np.zeros(2, dtype=np.float64)
+        self.insert_admittance_velocity_xy = np.zeros(2, dtype=np.float64)
+        self.insert_admittance_active = False
         self.insert_succeeded = False
+        self.insert_stop_reason = "未停止"
         self.observation_xy_offset = None
         self.rng = np.random.default_rng()
         self.arm_controller = PositionArmController(
@@ -227,6 +243,7 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         )
         self.grasp_weld_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_EQUALITY, "peg_grasp_weld")
         self.ee_force_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "ee_force")
+        self.ee_force_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "ee_center_site")
         self.left_finger_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "left_finger")
         self.right_finger_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "right_finger")
         self.grasp_failed_reported = False
@@ -294,18 +311,21 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         grasp = self.data.site_xpos[self.peg_grasp_site_id].copy()
         hole_base = self.data.xpos[self.hole_base_body_id].copy()
         hole_approach = hole_base + np.array([0.0, 0.0, HOLE_APPROACH_LOCAL_Z], dtype=np.float64)
-        if self.observation_xy_offset is None:
+        if not ENABLE_IBVS:
+            self.observation_xy_offset = INSERT_TEST_OFFSET_XY.copy()
+            print(
+                "[Plan] IBVS skipped, direct insert xy offset: "
+                f"x={self.observation_xy_offset[0]:.4f}, y={self.observation_xy_offset[1]:.4f}"
+            )
+        elif self.observation_xy_offset is None:
             random_offset = np.array(
                 [
-                    self.rng.uniform(*HOLE_OBSERVATION_RANDOM_X_RANGE),
-                    self.rng.uniform(*HOLE_OBSERVATION_RANDOM_Y_RANGE),
+                    self.rng.uniform(*HOLE_OBSERVATION_RANDOM_XY_RANGE[0]),
+                    self.rng.uniform(*HOLE_OBSERVATION_RANDOM_XY_RANGE[1]),
                 ],
                 dtype=np.float64,
             )
-            self.observation_xy_offset = np.array(
-                [HOLE_OBSERVATION_X_OFFSET, HOLE_OBSERVATION_Y_OFFSET],
-                dtype=np.float64,
-            ) + random_offset
+            self.observation_xy_offset = HOLE_OBSERVATION_OFFSET_XY + random_offset
             print(
                 "[Plan] random observation xy offset: "
                 f"x={self.observation_xy_offset[0]:.4f}, y={self.observation_xy_offset[1]:.4f}"
@@ -407,11 +427,22 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             self.insert_start_pos, _ = self._get_ee_pose()
             self.insert_target_pos = self.insert_start_pos.copy()
             self.insert_force_bias = self._ee_force()
+            self.insert_admittance_offset_xy[:] = 0.0
+            self.insert_admittance_velocity_xy[:] = 0.0
+            self.insert_admittance_active = False
             self.insert_succeeded = False
+            self.insert_stop_reason = "下探中"
             print(f"[Insert] start: ee={format_vec(self.insert_start_pos)}")
+        if state == GraspState.INSERT_HOLD:
+            self.joint_position_target = self.data.qpos[:7].copy()
+            ee_pos, _ = self._get_ee_pose()
+            print(f"[停止] 原因：{self.insert_stop_reason}，保持当前位置 ee={format_vec(ee_pos)}")
         if state == GraspState.RELEASE_GRIPPER:
             if self.grasp_weld_id >= 0:
                 self.data.eq_active[self.grasp_weld_id] = 0
+            print(f"[松手] 原因：{self.insert_stop_reason}，松开夹爪")
+        if state == GraspState.RETREAT_ABORT:
+            print(f"[停止] 原因：{self.insert_stop_reason}，回到下探起点")
 
     def _servo_to_joint_target(self, q_target, reached_tol):
         result = self.arm_controller.move_to_joint(q_target, reached_tol)
@@ -445,6 +476,7 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             GraspState.LIFT,
             GraspState.CHECK_IBVS_ERROR,
             GraspState.INSERT_DESCEND,
+            GraspState.INSERT_HOLD,
             GraspState.RETREAT_ABORT,
         ):
             return GRIPPER_CLOSE
@@ -725,22 +757,10 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         peg_bottom = self.data.site_xpos[self.peg_bottom_site_id].copy()
         hole_depth = self.data.site_xpos[self.hole_bottom_site_id].copy()
         delta = peg_bottom - hole_depth
-        distance = float(np.linalg.norm(delta))
         xy_error = float(np.linalg.norm(delta[:2]))
         z_error = float(delta[2])
         inserted = xy_error < INSERT_DEPTH_XY_TOL and z_error <= INSERT_DEPTH_Z_TOL
-        return inserted, distance, xy_error, z_error, delta, peg_bottom, hole_depth
-
-    def _peg_axis_tilt_deg(self):
-        peg_top = self.data.site_xpos[self.peg_top_site_id].copy()
-        peg_bottom = self.data.site_xpos[self.peg_bottom_site_id].copy()
-        axis = peg_top - peg_bottom
-        norm = np.linalg.norm(axis)
-        if norm < 1e-9:
-            return 0.0
-        axis = axis / norm
-        cos_angle = np.clip(abs(axis[2]), -1.0, 1.0)
-        return float(np.rad2deg(np.arccos(cos_angle)))
+        return inserted, xy_error, z_error, delta, peg_bottom, hole_depth
 
     def _read_sensor_vec3(self, sensor_id):
         if sensor_id < 0:
@@ -757,6 +777,36 @@ class PegInHoleGraspDemo(ArmBaseViewer):
     def _insert_force_delta(self):
         return self._ee_force() - self.insert_force_bias
 
+    def _force_to_world(self, force):
+        if self.ee_force_site_id >= 0:
+            sensor_rot = self.data.site_xmat[self.ee_force_site_id].reshape(3, 3)
+        else:
+            sensor_rot = self.data.body(self.ee_id).xmat.reshape(3, 3)
+        return sensor_rot @ np.asarray(force, dtype=np.float64)
+
+    def _update_insert_xy_admittance(self, force_delta_world):
+        dt = float(self.model.opt.timestep)
+        force_xy = INSERT_ADMITTANCE_FORCE_SIGN * np.asarray(force_delta_world[:2], dtype=np.float64)
+        acceleration_xy = (
+            force_xy
+            - INSERT_ADMITTANCE_D * self.insert_admittance_velocity_xy
+            - INSERT_ADMITTANCE_K * self.insert_admittance_offset_xy
+        ) / INSERT_ADMITTANCE_M
+
+        self.insert_admittance_velocity_xy += acceleration_xy * dt
+        self.insert_admittance_velocity_xy = np.clip(
+            self.insert_admittance_velocity_xy,
+            -INSERT_ADMITTANCE_MAX_VELOCITY,
+            INSERT_ADMITTANCE_MAX_VELOCITY,
+        )
+        self.insert_admittance_offset_xy += self.insert_admittance_velocity_xy * dt
+        self.insert_admittance_offset_xy = np.clip(
+            self.insert_admittance_offset_xy,
+            -INSERT_ADMITTANCE_MAX_OFFSET,
+            INSERT_ADMITTANCE_MAX_OFFSET,
+        )
+        return self.insert_admittance_offset_xy.copy()
+
     def _insert_descend_step(self):
         if self.insert_start_pos is None or self.insert_target_pos is None:
             self._set_state(GraspState.INSERT_DESCEND)
@@ -764,46 +814,56 @@ class PegInHoleGraspDemo(ArmBaseViewer):
 
         contact, contact_geom, contact_force_norm = self._peg_contacts_hole()
         force_delta = self._insert_force_delta()
+        force_delta_world = self._force_to_world(force_delta)
+        if ENABLE_INSERT_ADMITTANCE and contact:
+            self.insert_admittance_active = True
+        if self.insert_admittance_active:
+            admittance_xy = self._update_insert_xy_admittance(force_delta_world)
+        else:
+            self.insert_admittance_velocity_xy[:] = 0.0
+            admittance_xy = self.insert_admittance_offset_xy.copy()
         force_norm = float(np.linalg.norm(force_delta))
+        z_force = abs(float(force_delta_world[2]))
         force = self._ee_force()
-        inserted, bottom_distance, xy_error, z_error, bottom_delta, peg_bottom, hole_depth = (
-            self._peg_insert_depth_error()
-        )
-        tilt_deg = self._peg_axis_tilt_deg()
+        inserted, xy_error, z_error, bottom_delta, peg_bottom, hole_depth = self._peg_insert_depth_error()
         descended = float(self.insert_start_pos[2] - self.data.body(self.ee_id).xpos[2])
+        contact_label = contact_geom if contact else "none"
+        z_step_scale = np.clip(1.0 - z_force / INSERT_FORCE_THRESHOLD, 0.0, 1.0)
+        if ENABLE_INSERT_ADMITTANCE and contact:
+            z_step_scale *= INSERT_CONTACT_DESCEND_SCALE
+        z_step = INSERT_DESCEND_STEP * z_step_scale
         print(
             f"[Insert] ee_force={format_vec(force)} "
             f"force_delta={format_vec(force_delta)} "
             f"|F-F0|={force_norm:.3f}N "
-            f"contact_force={contact_force_norm:.3f}N "
-            f"bottom_dist={bottom_distance:.4f} "
-            f"bottom_delta={format_vec(bottom_delta)} "
-            f"bottom_xy={xy_error:.4f} bottom_z={z_error:.4f} "
-            f"peg_tilt={tilt_deg:.2f}deg"
+            f"adm_xy={format_vec(admittance_xy)} "
+            f"z_step={z_step:.5f} "
+            f"bottom_z={z_error:.4f} "
+            f"bottom_xy={xy_error:.4f} "
+            f"contact={contact_label}"
         )
+        if not ENABLE_INSERT_ADMITTANCE and contact:
+            self.insert_stop_reason = "检测到碰撞且导纳关闭"
+            print(
+                "[InsertTest] contact detected, holding current pose: "
+                f"force_norm={force_norm:.3f}N z_force={z_force:.3f}N "
+                f"contact={contact_label} "
+                f"contact_force={contact_force_norm:.3f}N "
+                f"bottom_delta={format_vec(bottom_delta)}"
+            )
+            self._set_state(GraspState.INSERT_HOLD)
+            return
         if inserted:
             self.insert_succeeded = True
+            self.insert_stop_reason = "轴底部已到达孔底部目标深度"
             print(
                 "[Insert] depth reached: "
                 f"peg_bottom={format_vec(peg_bottom)} hole_depth={format_vec(hole_depth)}"
             )
             self._set_state(GraspState.RELEASE_GRIPPER)
             return
-        if force_norm > INSERT_FORCE_THRESHOLD:
-            print(
-                "[Insert] blocked by force threshold before reaching bottom: "
-                f"|F-F0|={force_norm:.3f}N force_delta={format_vec(force_delta)}"
-            )
-            self._set_state(GraspState.RETREAT_ABORT)
-            return
-        if contact:
-            print(
-                f"[Insert] blocked by contact with {contact_geom}: "
-                f"descended={descended:.4f}, contact_force={contact_force_norm:.3f}N"
-            )
-            self._set_state(GraspState.RETREAT_ABORT)
-            return
         if descended >= INSERT_MAX_DESCEND:
+            self.insert_stop_reason = "达到最大下探深度但未确认插入到位"
             print(
                 "[Insert] max descend reached without confirmed insertion: "
                 f"descended={descended:.4f}, xy_err={xy_error:.4f}, z_err={z_error:.4f}"
@@ -811,8 +871,14 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             self._set_state(GraspState.RETREAT_ABORT)
             return
 
-        self.insert_target_pos = self.insert_target_pos + np.array([0.0, 0.0, -INSERT_DESCEND_STEP])
+        self.insert_target_pos[:2] = self.insert_start_pos[:2] + admittance_xy
+        self.insert_target_pos[2] -= z_step
         self._servo_to_cartesian_position(self.insert_target_pos)
+
+    def _hold_insert_pose_step(self):
+        if self.joint_position_target is None:
+            self.joint_position_target = self.data.qpos[:7].copy()
+        self.arm_controller.move_to_joint(self.joint_position_target, JOINT_REACHED_TOL)
 
     def _release_gripper_step(self):
         self.arm_controller.set_gripper(GRIPPER_OPEN)
@@ -843,11 +909,17 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             self._close_gripper_until_contact()
         elif self.state == GraspState.LIFT:
             if self._follow_joint_path("LIFT_LINEAR", self.lift_follower, include_pin=True):
-                self._set_state(GraspState.CHECK_IBVS_ERROR)
+                if not ENABLE_IBVS:
+                    print("[IBVS] skipped for insert test, starting insert descend")
+                    self._set_state(GraspState.INSERT_DESCEND)
+                else:
+                    self._set_state(GraspState.CHECK_IBVS_ERROR)
         elif self.state == GraspState.CHECK_IBVS_ERROR:
             self._check_ibvs_pixel_error(frame)
         elif self.state == GraspState.INSERT_DESCEND:
             self._insert_descend_step()
+        elif self.state == GraspState.INSERT_HOLD:
+            self._hold_insert_pose_step()
         elif self.state == GraspState.RELEASE_GRIPPER:
             self._release_gripper_step()
         elif self.state == GraspState.RETREAT_AFTER_RELEASE:
