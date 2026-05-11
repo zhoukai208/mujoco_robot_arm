@@ -15,7 +15,7 @@ if str(SRC_DIR) not in sys.path:
 from apriltag_detector import AprilTagPoseEstimator
 from ibvs import DLS_DAMPING, IBVSController, ImageFeatures, JOINT_SPEED_LIMIT, adjoint
 from mujoco_viewer import CAMERA_WINDOW_NAME, CAMERA_WINDOW_POS, CAMERA_WINDOW_SIZE, ArmBaseViewer
-from utils import euler2rotmat
+from utils import euler2rotmat, format_vec
 
 try:
     from .view_scene import make_loadable_scene_xml
@@ -55,6 +55,9 @@ HOLE_OBSERVATION_OFFSET_XY = np.array([0.0, 0.0], dtype=np.float64)
 HOLE_OBSERVATION_RANDOM_XY_RANGE = np.array(
     [[-0.245, 0.075], [-0.145, 0.145]],
     dtype=np.float64,
+)
+HOLE_OBSERVATION_RANDOM_RPY_RANGE = np.deg2rad(
+    np.array([[-4.0, 4.0], [-4.0, 4.0], [-8.0, 8.0]], dtype=np.float64)
 )
 HOLE_APPROACH_LOCAL_Z = 0.20
 INSERT_TEST_OFFSET_XY = np.array([0.0, 0.01], dtype=np.float64)
@@ -184,15 +187,6 @@ class PositionJointPathFollower:
         return False, result
 
 
-def format_vec(vec, precision=4):
-    return np.array2string(
-        np.asarray(vec),
-        precision=precision,
-        suppress_small=True,
-        separator=", ",
-    )
-
-
 class PegInHoleGraspDemo(ArmBaseViewer):
     def __init__(self, render_path):
         super().__init__(render_path, render_path)
@@ -221,6 +215,7 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         self.insert_succeeded = False
         self.insert_stop_reason = "未停止"
         self.observation_xy_offset = None
+        self.observation_rpy_offset = np.zeros(3, dtype=np.float64)
         self.rng = np.random.default_rng()
         self.arm_controller = PositionArmController(
             self.model,
@@ -313,6 +308,7 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         hole_approach = hole_base + np.array([0.0, 0.0, HOLE_APPROACH_LOCAL_Z], dtype=np.float64)
         if not ENABLE_IBVS:
             self.observation_xy_offset = INSERT_TEST_OFFSET_XY.copy()
+            self.observation_rpy_offset[:] = 0.0
             print(
                 "[Plan] IBVS skipped, direct insert xy offset: "
                 f"x={self.observation_xy_offset[0]:.4f}, y={self.observation_xy_offset[1]:.4f}"
@@ -326,9 +322,23 @@ class PegInHoleGraspDemo(ArmBaseViewer):
                 dtype=np.float64,
             )
             self.observation_xy_offset = HOLE_OBSERVATION_OFFSET_XY + random_offset
+            self.observation_rpy_offset = np.array(
+                [
+                    self.rng.uniform(*HOLE_OBSERVATION_RANDOM_RPY_RANGE[0]),
+                    self.rng.uniform(*HOLE_OBSERVATION_RANDOM_RPY_RANGE[1]),
+                    self.rng.uniform(*HOLE_OBSERVATION_RANDOM_RPY_RANGE[2]),
+                ],
+                dtype=np.float64,
+            )
             print(
                 "[Plan] random observation xy offset: "
                 f"x={self.observation_xy_offset[0]:.4f}, y={self.observation_xy_offset[1]:.4f}"
+            )
+            print(
+                "[Plan] random observation rpy offset(deg): "
+                f"roll={np.rad2deg(self.observation_rpy_offset[0]):.2f}, "
+                f"pitch={np.rad2deg(self.observation_rpy_offset[1]):.2f}, "
+                f"yaw={np.rad2deg(self.observation_rpy_offset[2]):.2f}"
             )
         above = grasp + np.array([0.0, 0.0, APPROACH_CLEARANCE], dtype=np.float64)
         high_above_hole = hole_approach + np.array(
@@ -372,18 +382,33 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             [pose_targets[GraspState.DESCEND], pose_targets[GraspState.LIFT]],
             self.descend_q_path[-1],
             [DESCEND_STEPS],
+            rpy_offset_end=self.observation_rpy_offset,
         )
         self._set_state(GraspState.MOVE_ABOVE_PIN)
 
-    def _plan_cartesian_path(self, label, points, q_start, steps_per_segment):
+    def _plan_cartesian_path(self, label, points, q_start, steps_per_segment, rpy_offset_end=None):
         path = []
         q_seed = np.asarray(q_start, dtype=np.float64)
+        total_steps = sum(steps_per_segment)
+        planned_steps = 0
+        rpy_offset_end = (
+            np.zeros(3, dtype=np.float64)
+            if rpy_offset_end is None
+            else np.asarray(rpy_offset_end, dtype=np.float64)
+        )
         for segment_idx, steps in enumerate(steps_per_segment):
             start_pos = np.asarray(points[segment_idx], dtype=np.float64)
             target_pos = np.asarray(points[segment_idx + 1], dtype=np.float64)
             for t in np.linspace(0.0, 1.0, steps + 1)[1:]:
                 pos = (1.0 - t) * start_pos + t * target_pos
-                success, q_target = self.kinematics.ik(q_seed, self.grasp_rot, pos)
+                planned_steps += 1
+                rpy_offset = rpy_offset_end * (planned_steps / total_steps)
+                target_rot = euler2rotmat(
+                    np.pi + rpy_offset[0],
+                    rpy_offset[1],
+                    CAMERA_CLOCKWISE_YAW_OFFSET + rpy_offset[2],
+                )
+                success, q_target = self.kinematics.ik(q_seed, target_rot, pos)
                 if not success:
                     raise RuntimeError(f"IK failed for {label} waypoint, target_pos={pos}")
                 q_seed = np.asarray(q_target, dtype=np.float64)
@@ -837,9 +862,9 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             f"force_delta={format_vec(force_delta)} "
             f"|F-F0|={force_norm:.3f}N "
             f"adm_xy={format_vec(admittance_xy)} "
-            f"z_step={z_step:.5f} "
-            f"bottom_z={z_error:.4f} "
-            f"bottom_xy={xy_error:.4f} "
+            f"z_step_speed={z_step:.5f} "
+            f"z_err={z_error:.4f} "
+            f"xy_err={xy_error:.4f} "
             f"contact={contact_label}"
         )
         if not ENABLE_INSERT_ADMITTANCE and contact:

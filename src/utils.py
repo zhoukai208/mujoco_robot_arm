@@ -155,3 +155,12 @@ def rot_to_quat(rot):
         qy = (rot[1,2] + rot[2,1]) / S
         qz = 0.25 * S
     return np.array([qw, qx, qy, qz])
+
+
+def format_vec(vec, precision=4):
+    return np.array2string(
+        np.asarray(vec),
+        precision=precision,
+        suppress_small=True,
+        separator=", ",
+    )
