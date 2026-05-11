@@ -402,6 +402,403 @@ class PegInHoleScene:
         return sensor_rot @ np.asarray(force, dtype=np.float64)
 
 
+class GraspController:
+    def __init__(self, arm_controller, task_scene, grasp_config, control_config):
+        self.arm_controller = arm_controller
+        self.task_scene = task_scene
+        self.grasp_config = grasp_config
+        self.control_config = control_config
+        self.close_steps = 0
+        self.failed_reported = False
+
+    def reset_close(self):
+        self.close_steps = 0
+        self.failed_reported = False
+
+    def close_until_contact(self, q_target, print_counter):
+        self.arm_controller.move_to_joint(q_target, self.control_config.joint_reached_tol)
+        self.close_steps += 1
+        left_contact, right_contact = self.task_scene.finger_contacts_with_pin()
+        if print_counter % 50 == 0 or self.close_steps == 1:
+            print(
+                "[Grasp] closing: "
+                f"step={self.close_steps} "
+                f"left_contact={left_contact} right_contact={right_contact} "
+                f"pin_pos={format_vec(self.task_scene.peg_pos())}"
+            )
+
+        contact_ready = (
+            left_contact
+            and right_contact
+            and self.close_steps >= self.grasp_config.close_min_steps
+        )
+        timed_out = self.close_steps >= self.grasp_config.close_timeout_steps
+        if contact_ready:
+            rel_pos, rel_quat = self.task_scene.activate_grasp_weld()
+            print(
+                "[Grasp] weld activated: "
+                f"rel_pos={format_vec(rel_pos)} rel_quat={format_vec(rel_quat)}"
+            )
+            return "done"
+        if timed_out and not self.failed_reported:
+            print("[Grasp] failed: pin was not contacted by both fingers")
+            self.failed_reported = True
+        return "running"
+
+
+class IBVSAligner:
+    def __init__(
+        self,
+        model,
+        data,
+        task_scene,
+        arm_controller,
+        ibvs,
+        tag_detector,
+        target_tag_pixels,
+        control_config,
+        ibvs_config,
+        ee_id,
+        camera_transform_cv_to_mj,
+    ):
+        self.model = model
+        self.data = data
+        self.task_scene = task_scene
+        self.arm_controller = arm_controller
+        self.ibvs = ibvs
+        self.tag_detector = tag_detector
+        self.target_tag_pixels = target_tag_pixels
+        self.control_config = control_config
+        self.ibvs_config = ibvs_config
+        self.ee_id = ee_id
+        self.camera_transform_cv_to_mj = camera_transform_cv_to_mj
+        self.joint_position_target = None
+
+    def reset(self, q_current):
+        self.joint_position_target = np.asarray(q_current, dtype=np.float64).copy()
+
+    def step(self, frame, print_counter):
+        if frame is None:
+            return False
+
+        success, _, detections_by_id, missing_ids = self.tag_detector.detect(frame)
+        self._draw_visualization(frame.copy(), detections_by_id)
+        if not success:
+            if print_counter % 20 == 0:
+                print(
+                    "[IBVS] waiting for tags: "
+                    f"detected={sorted(detections_by_id)} missing={missing_ids}"
+                )
+            return False
+
+        current_features = self._features_from_detections(detections_by_id)
+        if current_features is None:
+            if print_counter % 20 == 0:
+                print("[IBVS] tag depth projection is invalid")
+            return False
+
+        v_cam_cv, error = self.ibvs.compute_camera_velocity(current_features)
+        v_ee = self._camera_optical_velocity_to_ee(v_cam_cv)
+        q_dot, J_ee = self._compute_joint_velocity(v_ee)
+        self._integrate_joint_velocity_command(q_dot)
+
+        error_norm = float(np.linalg.norm(error))
+        if print_counter % 10 == 0:
+            print(
+                f"[IBVS] error_norm={error_norm:.3f}px "
+                f"q_dot_norm={np.linalg.norm(q_dot):.4f} "
+                f"J_rank={np.linalg.matrix_rank(J_ee)}"
+            )
+        if error_norm < self.ibvs_config.aligned_threshold_px:
+            print(
+                "[IBVS] aligned: "
+                f"error_norm={error_norm:.3f}px < {self.ibvs_config.aligned_threshold_px:.1f}px"
+            )
+            return True
+        return False
+
+    def _features_from_detections(self, detections_by_id):
+        depths = self.task_scene.tag_depths_from_projection(self.ibvs_config.tag_ids)
+        if depths is None:
+            return None
+
+        centers = np.asarray(
+            [detections_by_id[tag_id].center for tag_id in self.ibvs_config.tag_ids],
+            dtype=np.float64,
+        )
+        return ImageFeatures(uv=centers, z=depths)
+
+    def _camera_optical_velocity_to_ee(self, v_cam_cv):
+        T_world_ee = self.task_scene.body_transform(self.ee_id)
+        T_world_cam_mj = self.task_scene.camera_transform()
+        T_ee_cam_cv = (
+            np.linalg.inv(T_world_ee)
+            @ T_world_cam_mj
+            @ self.camera_transform_cv_to_mj
+        )
+        return (adjoint(T_ee_cam_cv) @ np.asarray(v_cam_cv, dtype=np.float64).reshape(6, 1)).flatten()
+
+    def _end_effector_jacobian(self):
+        Jp = np.zeros((3, self.model.nv), dtype=np.float64)
+        Jr = np.zeros((3, self.model.nv), dtype=np.float64)
+        mujoco.mj_jacBody(self.model, self.data, Jp, Jr, self.ee_id)
+
+        J_world = np.vstack([Jp, Jr])[:, :7]
+        ee_R_world = self.task_scene.body_transform(self.ee_id)[:3, :3].T
+        X_ee_world = np.zeros((6, 6), dtype=np.float64)
+        X_ee_world[:3, :3] = ee_R_world
+        X_ee_world[3:, 3:] = ee_R_world
+        return X_ee_world @ J_world
+
+    def _compute_joint_velocity(self, v_ee):
+        J_ee = self._end_effector_jacobian()
+        damping_matrix = DLS_DAMPING * DLS_DAMPING * np.eye(6)
+        q_dot = J_ee.T @ np.linalg.solve(J_ee @ J_ee.T + damping_matrix, v_ee)
+        return np.clip(
+            q_dot,
+            -self.control_config.joint_speed_limit,
+            self.control_config.joint_speed_limit,
+        ), J_ee
+
+    def _write_joint_position_target(self, q_target):
+        q_target = np.asarray(q_target, dtype=np.float64)
+        q_target = np.clip(
+            q_target,
+            self.arm_controller.joint_ctrl_range[:, 0],
+            self.arm_controller.joint_ctrl_range[:, 1],
+        )
+        q_ctrl = self.arm_controller._gravity_compensated_position_target(q_target)
+        self.data.ctrl[self.arm_controller.joint_actuator_ids] = q_ctrl
+        self.arm_controller._apply_gripper_command()
+        self.joint_position_target = q_target.copy()
+        return q_target
+
+    def _integrate_joint_velocity_command(self, q_dot):
+        q = self.data.qpos[:7].copy()
+        if self.joint_position_target is None:
+            self.joint_position_target = q.copy()
+
+        tracking_error = self.joint_position_target - q
+        if np.linalg.norm(tracking_error) > self.control_config.position_target_tracking_limit:
+            self.joint_position_target = q.copy()
+
+        dt = float(self.model.opt.timestep)
+        delta_q = np.clip(
+            q_dot,
+            -self.control_config.joint_speed_limit,
+            self.control_config.joint_speed_limit,
+        ) * dt
+        return self._write_joint_position_target(self.joint_position_target + delta_q)
+
+    def _draw_visualization(self, frame, detections_by_id):
+        for tag_id in self.ibvs_config.tag_ids:
+            target = self.target_tag_pixels[tag_id]
+            tu, tv = np.round(target).astype(int)
+            cv2.circle(frame, (tu, tv), 7, (0, 0, 255), 2)
+            cv2.putText(
+                frame,
+                str(tag_id),
+                (tu + 8, tv - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 255),
+                1,
+            )
+
+            det = detections_by_id.get(tag_id)
+            if det is None:
+                continue
+            cu, cv = np.round(det.center).astype(int)
+            cv2.circle(frame, (cu, cv), 6, (0, 255, 0), -1)
+            cv2.putText(
+                frame,
+                str(tag_id),
+                (cu + 8, cv + 16),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                1,
+            )
+
+        cv2.namedWindow(CAMERA_WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(CAMERA_WINDOW_NAME, *CAMERA_WINDOW_SIZE)
+        cv2.moveWindow(CAMERA_WINDOW_NAME, *CAMERA_WINDOW_POS)
+        cv2.imshow(CAMERA_WINDOW_NAME, frame)
+        cv2.waitKey(1)
+
+
+class InsertController:
+    def __init__(self, model, data, task_scene, arm_controller, kinematics, grasp_rot, insert_config, control_config, grasp_config):
+        self.model = model
+        self.data = data
+        self.task_scene = task_scene
+        self.arm_controller = arm_controller
+        self.kinematics = kinematics
+        self.grasp_rot = grasp_rot
+        self.insert_config = insert_config
+        self.control_config = control_config
+        self.grasp_config = grasp_config
+        self.start_q = None
+        self.start_pos = None
+        self.target_pos = None
+        self.force_bias = np.zeros(3, dtype=np.float64)
+        self.admittance_offset_xy = np.zeros(2, dtype=np.float64)
+        self.admittance_velocity_xy = np.zeros(2, dtype=np.float64)
+        self.admittance_active = False
+        self.succeeded = False
+        self.stop_reason = "未停止"
+        self.release_steps = 0
+
+    def reset_descend(self):
+        self.start_q = self.data.qpos[:7].copy()
+        self.start_pos, _ = self.task_scene.ee_pose()
+        self.target_pos = self.start_pos.copy()
+        self.force_bias = self.task_scene.ee_force()
+        self.admittance_offset_xy[:] = 0.0
+        self.admittance_velocity_xy[:] = 0.0
+        self.admittance_active = False
+        self.succeeded = False
+        self.stop_reason = "下探中"
+        self.release_steps = 0
+        print(f"[Insert] start: ee={format_vec(self.start_pos)}")
+
+    def descend_step(self):
+        if self.start_pos is None or self.target_pos is None:
+            self.reset_descend()
+            return "running"
+
+        contact, contact_geom, contact_force_norm = self.task_scene.peg_contacts_hole(
+            self.insert_config.contact_force_threshold
+        )
+        force_delta = self.task_scene.ee_force() - self.force_bias
+        force_delta_world = self.task_scene.force_to_world(force_delta)
+        if self.insert_config.enable_admittance and contact:
+            self.admittance_active = True
+        if self.admittance_active:
+            admittance_xy = self._update_xy_admittance(force_delta_world)
+        else:
+            self.admittance_velocity_xy[:] = 0.0
+            admittance_xy = self.admittance_offset_xy.copy()
+        force_norm = float(np.linalg.norm(force_delta))
+        z_force = abs(float(force_delta_world[2]))
+        force = self.task_scene.ee_force()
+        inserted, xy_error, z_error, bottom_delta, peg_bottom, hole_depth = (
+            self.task_scene.peg_insert_depth_error(
+                self.insert_config.depth_xy_tol,
+                self.insert_config.depth_z_tol,
+            )
+        )
+        ee_pos, _ = self.task_scene.ee_pose()
+        descended = float(self.start_pos[2] - ee_pos[2])
+        contact_label = contact_geom if contact else "none"
+        z_step_scale = np.clip(1.0 - z_force / self.insert_config.force_threshold, 0.0, 1.0)
+        if self.insert_config.enable_admittance and contact:
+            z_step_scale *= self.insert_config.contact_descend_scale
+        z_step = self.insert_config.descend_step * z_step_scale
+        print(
+            f"[Insert] ee_force={format_vec(force)} "
+            f"force_delta={format_vec(force_delta)} "
+            f"|F-F0|={force_norm:.3f}N "
+            f"adm_xy={format_vec(admittance_xy)} "
+            f"z_step_speed={z_step:.5f} "
+            f"z_err={z_error:.4f} "
+            f"xy_err={xy_error:.4f} "
+            f"contact={contact_label}"
+        )
+        if not self.insert_config.enable_admittance and contact:
+            self.stop_reason = "检测到碰撞且导纳关闭"
+            print(
+                "[InsertTest] contact detected, holding current pose: "
+                f"force_norm={force_norm:.3f}N z_force={z_force:.3f}N "
+                f"contact={contact_label} "
+                f"contact_force={contact_force_norm:.3f}N "
+                f"bottom_delta={format_vec(bottom_delta)}"
+            )
+            return "hold"
+        if inserted:
+            self.succeeded = True
+            self.stop_reason = "轴底部已到达孔底部目标深度"
+            print(
+                "[Insert] depth reached: "
+                f"peg_bottom={format_vec(peg_bottom)} hole_depth={format_vec(hole_depth)}"
+            )
+            return "release"
+        if descended >= self.insert_config.max_descend:
+            self.stop_reason = "达到最大下探深度但未确认插入到位"
+            print(
+                "[Insert] max descend reached without confirmed insertion: "
+                f"descended={descended:.4f}, xy_err={xy_error:.4f}, z_err={z_error:.4f}"
+            )
+            return "retreat_abort"
+
+        self.target_pos[:2] = self.start_pos[:2] + admittance_xy
+        self.target_pos[2] -= z_step
+        self._servo_to_cartesian_position(self.target_pos)
+        return "running"
+
+    def hold_step(self, joint_position_target):
+        if joint_position_target is None:
+            joint_position_target = self.data.qpos[:7].copy()
+        self.arm_controller.move_to_joint(
+            joint_position_target,
+            self.control_config.joint_reached_tol,
+        )
+        return joint_position_target
+
+    def release_step(self):
+        self.arm_controller.set_gripper(self.grasp_config.gripper_open)
+        self.release_steps += 1
+        return self.release_steps >= self.insert_config.release_open_steps
+
+    def retreat_step(self):
+        if self.start_q is None:
+            return True
+        result = self.arm_controller.move_to_joint(
+            self.start_q,
+            self.control_config.joint_reached_tol,
+        )
+        return result.reached
+
+    def hold_start_q(self):
+        if self.start_q is not None:
+            self.arm_controller.move_to_joint(
+                self.start_q,
+                self.control_config.joint_reached_tol,
+            )
+
+    def _servo_to_cartesian_position(self, target_pos):
+        q_seed = self.data.qpos[:7].copy()
+        success, q_target = self.kinematics.ik(q_seed, self.grasp_rot, target_pos)
+        if not success:
+            print(f"[Insert] IK failed: target_pos={format_vec(target_pos)}")
+            return False
+        self.arm_controller.move_to_joint(q_target, self.control_config.path_waypoint_tol)
+        return True
+
+    def _update_xy_admittance(self, force_delta_world):
+        dt = float(self.model.opt.timestep)
+        force_xy = self.insert_config.admittance_force_sign * np.asarray(force_delta_world[:2], dtype=np.float64)
+        acceleration_xy = (
+            force_xy
+            - self.insert_config.admittance_d * self.admittance_velocity_xy
+            - self.insert_config.admittance_k * self.admittance_offset_xy
+        ) / self.insert_config.admittance_m
+
+        self.admittance_velocity_xy += acceleration_xy * dt
+        self.admittance_velocity_xy = np.clip(
+            self.admittance_velocity_xy,
+            -self.insert_config.admittance_max_velocity,
+            self.insert_config.admittance_max_velocity,
+        )
+        self.admittance_offset_xy += self.admittance_velocity_xy * dt
+        self.admittance_offset_xy = np.clip(
+            self.admittance_offset_xy,
+            -self.insert_config.admittance_max_offset,
+            self.insert_config.admittance_max_offset,
+        )
+        return self.admittance_offset_xy.copy()
+
+
 class PegInHoleGraspDemo(ArmBaseViewer):
     def __init__(self, render_path):
         super().__init__(render_path, render_path)
@@ -434,15 +831,6 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         self.T_MJ_CAMERA_FROM_CV_CAMERA = np.eye(4, dtype=np.float64)
         self.T_MJ_CAMERA_FROM_CV_CAMERA[:3, :3] = np.diag([1.0, -1.0, -1.0])
         self.joint_position_target = None
-        self.insert_start_q = None
-        self.insert_start_pos = None
-        self.insert_target_pos = None
-        self.insert_force_bias = np.zeros(3, dtype=np.float64)
-        self.insert_admittance_offset_xy = np.zeros(2, dtype=np.float64)
-        self.insert_admittance_velocity_xy = np.zeros(2, dtype=np.float64)
-        self.insert_admittance_active = False
-        self.insert_succeeded = False
-        self.insert_stop_reason = "未停止"
         self.observation_xy_offset = None
         self.observation_rpy_offset = np.zeros(3, dtype=np.float64)
         self.rng = np.random.default_rng()
@@ -450,6 +838,36 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             self.model,
             self.data,
             gripper_command=self._gripper_command_for_state,
+        )
+        self.grasp_controller = GraspController(
+            self.arm_controller,
+            self.task_scene,
+            self.grasp_config,
+            self.control_config,
+        )
+        self.ibvs_aligner = IBVSAligner(
+            self.model,
+            self.data,
+            self.task_scene,
+            self.arm_controller,
+            self.ibvs,
+            self.tag_detector,
+            self.target_tag_pixels,
+            self.control_config,
+            self.ibvs_config,
+            self.ee_id,
+            self.T_MJ_CAMERA_FROM_CV_CAMERA,
+        )
+        self.insert_controller = InsertController(
+            self.model,
+            self.data,
+            self.task_scene,
+            self.arm_controller,
+            self.kinematics,
+            self.grasp_rot,
+            self.insert_config,
+            self.control_config,
+            self.grasp_config,
         )
         self.approach_follower = PositionJointPathFollower(
             self.arm_controller,
@@ -463,7 +881,6 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             self.arm_controller,
             self.control_config.path_waypoint_tol,
         )
-        self.grasp_failed_reported = False
         if self.kinematics.EE_FRAME_ID != self.kinematics.FRAME_ID:
             self.kinematics.FRAME_ID = self.kinematics.EE_FRAME_ID
             print("[Setup] IK target frame set to ee_center_body")
@@ -669,7 +1086,7 @@ class PegInHoleGraspDemo(ArmBaseViewer):
                 f"to={format_vec(self.pose_targets[GraspState.DESCEND])}"
             )
         if state == GraspState.CLOSE_GRIPPER:
-            self.grasp_failed_reported = False
+            self.grasp_controller.reset_close()
         if state == GraspState.LIFT:
             self.lift_follower.start(self.lift_q_path)
             print(
@@ -679,42 +1096,24 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             )
         if state == GraspState.CHECK_IBVS_ERROR:
             self.joint_position_target = self.data.qpos[:7].copy()
+            self.ibvs_aligner.reset(self.joint_position_target)
             print("[IBVS] aligning to loaded target pixels")
         if state == GraspState.INSERT_DESCEND:
-            self.insert_start_q = self.data.qpos[:7].copy()
-            self.insert_start_pos, _ = self._get_ee_pose()
-            self.insert_target_pos = self.insert_start_pos.copy()
-            self.insert_force_bias = self._ee_force()
-            self.insert_admittance_offset_xy[:] = 0.0
-            self.insert_admittance_velocity_xy[:] = 0.0
-            self.insert_admittance_active = False
-            self.insert_succeeded = False
-            self.insert_stop_reason = "下探中"
-            print(f"[Insert] start: ee={format_vec(self.insert_start_pos)}")
+            self.insert_controller.reset_descend()
         if state == GraspState.INSERT_HOLD:
             self.joint_position_target = self.data.qpos[:7].copy()
-            ee_pos, _ = self._get_ee_pose()
-            print(f"[停止] 原因：{self.insert_stop_reason}，保持当前位置 ee={format_vec(ee_pos)}")
+            ee_pos, _ = self.task_scene.ee_pose()
+            print(f"[停止] 原因：{self.insert_controller.stop_reason}，保持当前位置 ee={format_vec(ee_pos)}")
         if state == GraspState.RELEASE_GRIPPER:
             if self.task_scene.grasp_weld_id >= 0:
                 self.data.eq_active[self.task_scene.grasp_weld_id] = 0
-            print(f"[松手] 原因：{self.insert_stop_reason}，松开夹爪")
+            print(f"[松手] 原因：{self.insert_controller.stop_reason}，松开夹爪")
         if state == GraspState.RETREAT_ABORT:
-            print(f"[停止] 原因：{self.insert_stop_reason}，回到下探起点")
-
-    def _servo_to_joint_target(self, q_target, reached_tol):
-        result = self.arm_controller.move_to_joint(q_target, reached_tol)
-        if self.print_counter % 50 == 0:
-            print(
-                f"[Move] {self.state.name}: "
-                f"q_err_norm={result.q_err_norm:.4f} "
-                f"dq_norm={result.dq_norm:.4f}"
-            )
-        return result.reached
+            print(f"[停止] 原因：{self.insert_controller.stop_reason}，回到下探起点")
 
     def _follow_joint_path(self, label, follower, include_pin=False):
         done, result = follower.step()
-        ee_pos, _ = self._get_ee_pose()
+        ee_pos, _ = self.task_scene.ee_pose()
         if self.print_counter % 50 == 0:
             line = (
                 f"[Move] {label}: "
@@ -738,352 +1137,9 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             GraspState.RETREAT_ABORT,
         ):
             return self.grasp_config.gripper_close
-        if self.state == GraspState.DONE and not self.insert_succeeded:
+        if self.state == GraspState.DONE and not self.insert_controller.succeeded:
             return self.grasp_config.gripper_close
         return self.grasp_config.gripper_open
-
-    def _close_gripper_until_contact(self):
-        self._servo_to_joint_target(self.descend_q_path[-1], self.control_config.joint_reached_tol)
-        self.state_step += 1
-        left_contact, right_contact = self._finger_contacts_with_pin()
-        if self.print_counter % 50 == 0 or self.state_step == 1:
-            print(
-                "[Grasp] closing: "
-                f"step={self.state_step} "
-                f"left_contact={left_contact} right_contact={right_contact} "
-                f"pin_pos={format_vec(self.task_scene.peg_pos())}"
-            )
-
-        contact_ready = (
-            left_contact
-            and right_contact
-            and self.state_step >= self.grasp_config.close_min_steps
-        )
-        timed_out = self.state_step >= self.grasp_config.close_timeout_steps
-        if contact_ready:
-            self._activate_grasp_weld()
-            self._set_state(GraspState.LIFT)
-        elif timed_out and not self.grasp_failed_reported:
-            print("[Grasp] failed: pin was not contacted by both fingers")
-            self.grasp_failed_reported = True
-
-    def _activate_grasp_weld(self):
-        rel_pos, rel_quat = self.task_scene.activate_grasp_weld()
-        print(
-            "[Grasp] weld activated: "
-            f"rel_pos={format_vec(rel_pos)} rel_quat={format_vec(rel_quat)}"
-        )
-
-    def _finger_contacts_with_pin(self):
-        return self.task_scene.finger_contacts_with_pin()
-
-    def _get_ee_pose(self):
-        return self.task_scene.ee_pose()
-
-    def _tag_depths_from_projection(self):
-        return self.task_scene.tag_depths_from_projection(self.ibvs_config.tag_ids)
-
-    def _features_from_detections(self, detections_by_id):
-        depths = self._tag_depths_from_projection()
-        if depths is None:
-            return None
-
-        centers = np.asarray(
-            [detections_by_id[tag_id].center for tag_id in self.ibvs_config.tag_ids],
-            dtype=np.float64,
-        )
-        return ImageFeatures(uv=centers, z=depths)
-
-    def _get_body_transform(self, body_id):
-        return self.task_scene.body_transform(body_id)
-
-    def _get_camera_transform(self):
-        return self.task_scene.camera_transform()
-
-    def _camera_optical_velocity_to_ee(self, v_cam_cv):
-        T_world_ee = self._get_body_transform(self.ee_id)
-        T_world_cam_mj = self._get_camera_transform()
-        T_ee_cam_cv = (
-            np.linalg.inv(T_world_ee)
-            @ T_world_cam_mj
-            @ self.T_MJ_CAMERA_FROM_CV_CAMERA
-        )
-        return (adjoint(T_ee_cam_cv) @ np.asarray(v_cam_cv, dtype=np.float64).reshape(6, 1)).flatten()
-
-    def _end_effector_jacobian(self):
-        Jp = np.zeros((3, self.model.nv), dtype=np.float64)
-        Jr = np.zeros((3, self.model.nv), dtype=np.float64)
-        mujoco.mj_jacBody(self.model, self.data, Jp, Jr, self.ee_id)
-
-        J_world = np.vstack([Jp, Jr])[:, :7]
-        ee_R_world = self._get_body_transform(self.ee_id)[:3, :3].T
-        X_ee_world = np.zeros((6, 6), dtype=np.float64)
-        X_ee_world[:3, :3] = ee_R_world
-        X_ee_world[3:, 3:] = ee_R_world
-        return X_ee_world @ J_world
-
-    def _compute_joint_velocity(self, v_ee):
-        J_ee = self._end_effector_jacobian()
-        damping_matrix = DLS_DAMPING * DLS_DAMPING * np.eye(6)
-        q_dot = J_ee.T @ np.linalg.solve(J_ee @ J_ee.T + damping_matrix, v_ee)
-        return np.clip(
-            q_dot,
-            -self.control_config.joint_speed_limit,
-            self.control_config.joint_speed_limit,
-        ), J_ee
-
-    def _write_joint_position_target(self, q_target):
-        q_target = np.asarray(q_target, dtype=np.float64)
-        q_target = np.clip(
-            q_target,
-            self.arm_controller.joint_ctrl_range[:, 0],
-            self.arm_controller.joint_ctrl_range[:, 1],
-        )
-        q_ctrl = self.arm_controller._gravity_compensated_position_target(q_target)
-        self.data.ctrl[self.arm_controller.joint_actuator_ids] = q_ctrl
-        self.arm_controller._apply_gripper_command()
-        self.joint_position_target = q_target.copy()
-        return q_target
-
-    def _integrate_joint_velocity_command(self, q_dot):
-        q = self.data.qpos[:7].copy()
-        if self.joint_position_target is None:
-            self.joint_position_target = q.copy()
-
-        tracking_error = self.joint_position_target - q
-        if np.linalg.norm(tracking_error) > self.control_config.position_target_tracking_limit:
-            self.joint_position_target = q.copy()
-
-        dt = float(self.model.opt.timestep)
-        delta_q = np.clip(
-            q_dot,
-            -self.control_config.joint_speed_limit,
-            self.control_config.joint_speed_limit,
-        ) * dt
-        return self._write_joint_position_target(self.joint_position_target + delta_q)
-
-    def _draw_ibvs_visualization(self, frame, detections_by_id):
-        for tag_id in self.ibvs_config.tag_ids:
-            target = self.target_tag_pixels[tag_id]
-            tu, tv = np.round(target).astype(int)
-            cv2.circle(frame, (tu, tv), 7, (0, 0, 255), 2)
-            cv2.putText(
-                frame,
-                str(tag_id),
-                (tu + 8, tv - 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 0, 255),
-                1,
-            )
-
-            det = detections_by_id.get(tag_id)
-            if det is None:
-                continue
-            cu, cv = np.round(det.center).astype(int)
-            cv2.circle(frame, (cu, cv), 6, (0, 255, 0), -1)
-            cv2.putText(
-                frame,
-                str(tag_id),
-                (cu + 8, cv + 16),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                1,
-            )
-
-        cv2.namedWindow(CAMERA_WINDOW_NAME, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(CAMERA_WINDOW_NAME, *CAMERA_WINDOW_SIZE)
-        cv2.moveWindow(CAMERA_WINDOW_NAME, *CAMERA_WINDOW_POS)
-        cv2.imshow(CAMERA_WINDOW_NAME, frame)
-        cv2.waitKey(1)
-
-    def _check_ibvs_pixel_error(self, frame):
-        if frame is None:
-            return
-
-        success, _, detections_by_id, missing_ids = self.tag_detector.detect(frame)
-        self._draw_ibvs_visualization(frame.copy(), detections_by_id)
-        if not success:
-            if self.print_counter % 20 == 0:
-                print(
-                    "[IBVS] waiting for tags: "
-                    f"detected={sorted(detections_by_id)} missing={missing_ids}"
-                )
-            return
-
-        current_features = self._features_from_detections(detections_by_id)
-        if current_features is None:
-            if self.print_counter % 20 == 0:
-                print("[IBVS] tag depth projection is invalid")
-            return
-
-        v_cam_cv, error = self.ibvs.compute_camera_velocity(current_features)
-        v_ee = self._camera_optical_velocity_to_ee(v_cam_cv)
-        q_dot, J_ee = self._compute_joint_velocity(v_ee)
-        self._integrate_joint_velocity_command(q_dot)
-
-        error_norm = float(np.linalg.norm(error))
-        if self.print_counter % 10 == 0:
-            print(
-                f"[IBVS] error_norm={error_norm:.3f}px "
-                f"q_dot_norm={np.linalg.norm(q_dot):.4f} "
-                f"J_rank={np.linalg.matrix_rank(J_ee)}"
-            )
-        if error_norm < self.ibvs_config.aligned_threshold_px:
-            print(
-                "[IBVS] aligned: "
-                f"error_norm={error_norm:.3f}px < {self.ibvs_config.aligned_threshold_px:.1f}px"
-            )
-            self._set_state(GraspState.INSERT_DESCEND)
-
-    def _servo_to_cartesian_position(self, target_pos):
-        q_seed = self.data.qpos[:7].copy()
-        success, q_target = self.kinematics.ik(q_seed, self.grasp_rot, target_pos)
-        if not success:
-            print(f"[Insert] IK failed: target_pos={format_vec(target_pos)}")
-            return False
-        self.arm_controller.move_to_joint(q_target, self.control_config.path_waypoint_tol)
-        return True
-
-    def _peg_contacts_hole(self):
-        return self.task_scene.peg_contacts_hole(self.insert_config.contact_force_threshold)
-
-    def _peg_insert_depth_error(self):
-        return self.task_scene.peg_insert_depth_error(
-            self.insert_config.depth_xy_tol,
-            self.insert_config.depth_z_tol,
-        )
-
-    def _read_sensor_vec3(self, sensor_id):
-        return self.task_scene.read_sensor_vec3(sensor_id)
-
-    def _ee_force(self):
-        return self.task_scene.ee_force()
-
-    def _insert_force_delta(self):
-        return self._ee_force() - self.insert_force_bias
-
-    def _force_to_world(self, force):
-        return self.task_scene.force_to_world(force)
-
-    def _update_insert_xy_admittance(self, force_delta_world):
-        insert_config = self.insert_config
-        dt = float(self.model.opt.timestep)
-        force_xy = insert_config.admittance_force_sign * np.asarray(force_delta_world[:2], dtype=np.float64)
-        acceleration_xy = (
-            force_xy
-            - insert_config.admittance_d * self.insert_admittance_velocity_xy
-            - insert_config.admittance_k * self.insert_admittance_offset_xy
-        ) / insert_config.admittance_m
-
-        self.insert_admittance_velocity_xy += acceleration_xy * dt
-        self.insert_admittance_velocity_xy = np.clip(
-            self.insert_admittance_velocity_xy,
-            -insert_config.admittance_max_velocity,
-            insert_config.admittance_max_velocity,
-        )
-        self.insert_admittance_offset_xy += self.insert_admittance_velocity_xy * dt
-        self.insert_admittance_offset_xy = np.clip(
-            self.insert_admittance_offset_xy,
-            -insert_config.admittance_max_offset,
-            insert_config.admittance_max_offset,
-        )
-        return self.insert_admittance_offset_xy.copy()
-
-    def _insert_descend_step(self):
-        if self.insert_start_pos is None or self.insert_target_pos is None:
-            self._set_state(GraspState.INSERT_DESCEND)
-            return
-
-        contact, contact_geom, contact_force_norm = self._peg_contacts_hole()
-        force_delta = self._insert_force_delta()
-        force_delta_world = self._force_to_world(force_delta)
-        insert_config = self.insert_config
-        if insert_config.enable_admittance and contact:
-            self.insert_admittance_active = True
-        if self.insert_admittance_active:
-            admittance_xy = self._update_insert_xy_admittance(force_delta_world)
-        else:
-            self.insert_admittance_velocity_xy[:] = 0.0
-            admittance_xy = self.insert_admittance_offset_xy.copy()
-        force_norm = float(np.linalg.norm(force_delta))
-        z_force = abs(float(force_delta_world[2]))
-        force = self._ee_force()
-        inserted, xy_error, z_error, bottom_delta, peg_bottom, hole_depth = self._peg_insert_depth_error()
-        descended = float(self.insert_start_pos[2] - self.data.body(self.ee_id).xpos[2])
-        contact_label = contact_geom if contact else "none"
-        z_step_scale = np.clip(1.0 - z_force / insert_config.force_threshold, 0.0, 1.0)
-        if insert_config.enable_admittance and contact:
-            z_step_scale *= insert_config.contact_descend_scale
-        z_step = insert_config.descend_step * z_step_scale
-        print(
-            f"[Insert] ee_force={format_vec(force)} "
-            f"force_delta={format_vec(force_delta)} "
-            f"|F-F0|={force_norm:.3f}N "
-            f"adm_xy={format_vec(admittance_xy)} "
-            f"z_step_speed={z_step:.5f} "
-            f"z_err={z_error:.4f} "
-            f"xy_err={xy_error:.4f} "
-            f"contact={contact_label}"
-        )
-        if not insert_config.enable_admittance and contact:
-            self.insert_stop_reason = "检测到碰撞且导纳关闭"
-            print(
-                "[InsertTest] contact detected, holding current pose: "
-                f"force_norm={force_norm:.3f}N z_force={z_force:.3f}N "
-                f"contact={contact_label} "
-                f"contact_force={contact_force_norm:.3f}N "
-                f"bottom_delta={format_vec(bottom_delta)}"
-            )
-            self._set_state(GraspState.INSERT_HOLD)
-            return
-        if inserted:
-            self.insert_succeeded = True
-            self.insert_stop_reason = "轴底部已到达孔底部目标深度"
-            print(
-                "[Insert] depth reached: "
-                f"peg_bottom={format_vec(peg_bottom)} hole_depth={format_vec(hole_depth)}"
-            )
-            self._set_state(GraspState.RELEASE_GRIPPER)
-            return
-        if descended >= insert_config.max_descend:
-            self.insert_stop_reason = "达到最大下探深度但未确认插入到位"
-            print(
-                "[Insert] max descend reached without confirmed insertion: "
-                f"descended={descended:.4f}, xy_err={xy_error:.4f}, z_err={z_error:.4f}"
-            )
-            self._set_state(GraspState.RETREAT_ABORT)
-            return
-
-        self.insert_target_pos[:2] = self.insert_start_pos[:2] + admittance_xy
-        self.insert_target_pos[2] -= z_step
-        self._servo_to_cartesian_position(self.insert_target_pos)
-
-    def _hold_insert_pose_step(self):
-        if self.joint_position_target is None:
-            self.joint_position_target = self.data.qpos[:7].copy()
-        self.arm_controller.move_to_joint(
-            self.joint_position_target,
-            self.control_config.joint_reached_tol,
-        )
-
-    def _release_gripper_step(self):
-        self.arm_controller.set_gripper(self.grasp_config.gripper_open)
-        self.state_step += 1
-        if self.state_step >= self.insert_config.release_open_steps:
-            self._set_state(GraspState.RETREAT_AFTER_RELEASE)
-
-    def _retreat_after_release_step(self):
-        if self.insert_start_q is None:
-            self._set_state(GraspState.DONE)
-            return
-        result = self.arm_controller.move_to_joint(
-            self.insert_start_q,
-            self.control_config.joint_reached_tol,
-        )
-        if result.reached:
-            self._set_state(GraspState.DONE)
 
     def runFunc(self):
         frame = self.get_camera_image(show=self.state != GraspState.CHECK_IBVS_ERROR)
@@ -1097,7 +1153,8 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             if self._follow_joint_path("DESCEND_LINEAR", self.descend_follower):
                 self._set_state(GraspState.CLOSE_GRIPPER)
         elif self.state == GraspState.CLOSE_GRIPPER:
-            self._close_gripper_until_contact()
+            if self.grasp_controller.close_until_contact(self.descend_q_path[-1], self.print_counter) == "done":
+                self._set_state(GraspState.LIFT)
         elif self.state == GraspState.LIFT:
             if self._follow_joint_path("LIFT_LINEAR", self.lift_follower, include_pin=True):
                 if not self.ibvs_config.enabled:
@@ -1106,23 +1163,29 @@ class PegInHoleGraspDemo(ArmBaseViewer):
                 else:
                     self._set_state(GraspState.CHECK_IBVS_ERROR)
         elif self.state == GraspState.CHECK_IBVS_ERROR:
-            self._check_ibvs_pixel_error(frame)
+            if self.ibvs_aligner.step(frame, self.print_counter):
+                self._set_state(GraspState.INSERT_DESCEND)
         elif self.state == GraspState.INSERT_DESCEND:
-            self._insert_descend_step()
+            insert_status = self.insert_controller.descend_step()
+            if insert_status == "hold":
+                self._set_state(GraspState.INSERT_HOLD)
+            elif insert_status == "release":
+                self._set_state(GraspState.RELEASE_GRIPPER)
+            elif insert_status == "retreat_abort":
+                self._set_state(GraspState.RETREAT_ABORT)
         elif self.state == GraspState.INSERT_HOLD:
-            self._hold_insert_pose_step()
+            self.joint_position_target = self.insert_controller.hold_step(self.joint_position_target)
         elif self.state == GraspState.RELEASE_GRIPPER:
-            self._release_gripper_step()
+            if self.insert_controller.release_step():
+                self._set_state(GraspState.RETREAT_AFTER_RELEASE)
         elif self.state == GraspState.RETREAT_AFTER_RELEASE:
-            self._retreat_after_release_step()
+            if self.insert_controller.retreat_step():
+                self._set_state(GraspState.DONE)
         elif self.state == GraspState.RETREAT_ABORT:
-            self._retreat_after_release_step()
+            if self.insert_controller.retreat_step():
+                self._set_state(GraspState.DONE)
         elif self.state == GraspState.DONE:
-            if self.insert_start_q is not None:
-                self.arm_controller.move_to_joint(
-                    self.insert_start_q,
-                    self.control_config.joint_reached_tol,
-                )
+            self.insert_controller.hold_start_q()
 
         self.print_counter += 1
 
