@@ -1,5 +1,5 @@
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 
@@ -53,7 +53,7 @@ SAFE_APPROACH_CLEARANCE = 0.28
 HOLE_OBSERVATION_EXTRA_HEIGHT = 0.22
 HOLE_OBSERVATION_OFFSET_XY = np.array([0.0, 0.0], dtype=np.float64)
 HOLE_OBSERVATION_RANDOM_XY_RANGE = np.array(
-    [[-0.245, 0.075], [-0.145, 0.145]],
+    [[-0.205, 0.075], [-0.145, 0.145]],
     dtype=np.float64,
 )
 HOLE_OBSERVATION_RANDOM_RPY_RANGE = np.deg2rad(
@@ -64,6 +64,66 @@ INSERT_TEST_OFFSET_XY = np.array([0.0, 0.01], dtype=np.float64)
 CAMERA_CLOCKWISE_YAW_OFFSET = -np.deg2rad(45.0)
 TAG_IDS = (0, 1, 2, 3)
 IBVS_TARGET_PIXELS_PATH = Path(__file__).resolve().parents[2] / "config/peg_in_hole_ibvs_target_pixels.yaml"
+
+
+@dataclass(frozen=True)
+class ControlConfig:
+    joint_reached_tol: float = JOINT_REACHED_TOL
+    path_waypoint_tol: float = PATH_WAYPOINT_TOL
+    position_target_tracking_limit: float = POSITION_TARGET_TRACKING_LIMIT
+    joint_speed_limit: float = JOINT_SPEED_LIMIT
+
+
+@dataclass(frozen=True)
+class GraspConfig:
+    gripper_open: int = GRIPPER_OPEN
+    gripper_close: int = GRIPPER_CLOSE
+    close_min_steps: int = GRIPPER_CLOSE_MIN_STEPS
+    close_timeout_steps: int = GRIPPER_CLOSE_TIMEOUT_STEPS
+    approach_steps_down: int = APPROACH_STEPS_DOWN
+    descend_steps: int = DESCEND_STEPS
+    approach_clearance: float = APPROACH_CLEARANCE
+    safe_approach_clearance: float = SAFE_APPROACH_CLEARANCE
+    camera_clockwise_yaw_offset: float = CAMERA_CLOCKWISE_YAW_OFFSET
+
+
+@dataclass(frozen=True)
+class ObservationConfig:
+    extra_height: float = HOLE_OBSERVATION_EXTRA_HEIGHT
+    hole_approach_local_z: float = HOLE_APPROACH_LOCAL_Z
+    offset_xy: np.ndarray = field(default_factory=lambda: HOLE_OBSERVATION_OFFSET_XY.copy())
+    random_xy_range: np.ndarray = field(default_factory=lambda: HOLE_OBSERVATION_RANDOM_XY_RANGE.copy())
+    random_rpy_range: np.ndarray = field(default_factory=lambda: HOLE_OBSERVATION_RANDOM_RPY_RANGE.copy())
+    insert_test_offset_xy: np.ndarray = field(default_factory=lambda: INSERT_TEST_OFFSET_XY.copy())
+
+
+@dataclass(frozen=True)
+class IBVSConfig:
+    enabled: bool = ENABLE_IBVS
+    aligned_threshold_px: float = IBVS_ALIGNED_THRESHOLD_PX
+    gain: float = 0.8
+    stop_threshold_px: float = 8.0
+    tag_ids: tuple[int, ...] = TAG_IDS
+    target_pixels_path: Path = IBVS_TARGET_PIXELS_PATH
+
+
+@dataclass(frozen=True)
+class InsertConfig:
+    descend_step: float = INSERT_DESCEND_STEP
+    max_descend: float = INSERT_MAX_DESCEND
+    release_open_steps: int = RELEASE_OPEN_STEPS
+    force_threshold: float = INSERT_FORCE_THRESHOLD
+    contact_force_threshold: float = INSERT_CONTACT_FORCE_THRESHOLD
+    contact_descend_scale: float = INSERT_CONTACT_DESCEND_SCALE
+    enable_admittance: bool = ENABLE_INSERT_ADMITTANCE
+    depth_z_tol: float = INSERT_DEPTH_Z_TOL
+    depth_xy_tol: float = INSERT_DEPTH_XY_TOL
+    admittance_m: np.ndarray = field(default_factory=lambda: INSERT_ADMITTANCE_M.copy())
+    admittance_d: np.ndarray = field(default_factory=lambda: INSERT_ADMITTANCE_D.copy())
+    admittance_k: np.ndarray = field(default_factory=lambda: INSERT_ADMITTANCE_K.copy())
+    admittance_max_offset: float = INSERT_ADMITTANCE_MAX_OFFSET
+    admittance_max_velocity: float = INSERT_ADMITTANCE_MAX_VELOCITY
+    admittance_force_sign: float = INSERT_ADMITTANCE_FORCE_SIGN
 
 
 class GraspState(Enum):
@@ -187,20 +247,189 @@ class PositionJointPathFollower:
         return False, result
 
 
+class PegInHoleScene:
+    """Centralized MuJoCo object lookup and scene-state queries."""
+
+    def __init__(self, model, data, ee_id, camera_id):
+        self.model = model
+        self.data = data
+        self.ee_id = ee_id
+        self.camera_id = camera_id
+
+        self.peg_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "peg_body")
+        self.hole_base_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "hole_base")
+        self.peg_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "peg_collision")
+        self.peg_grasp_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "peg_grasp_site")
+        self.peg_bottom_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "peg_bottom_site")
+        self.hole_bottom_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "hole_bottom_site")
+        self.grasp_weld_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_EQUALITY, "peg_grasp_weld")
+        self.ee_force_sensor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, "ee_force")
+        self.ee_force_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "ee_center_site")
+        self.left_finger_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "left_finger")
+        self.right_finger_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "right_finger")
+
+    def peg_pos(self):
+        return self.data.xpos[self.peg_body_id].copy()
+
+    def hole_base_pos(self):
+        return self.data.xpos[self.hole_base_body_id].copy()
+
+    def peg_grasp_pos(self):
+        return self.data.site_xpos[self.peg_grasp_site_id].copy()
+
+    def ee_pose(self):
+        return self.data.body(self.ee_id).xpos.copy(), self.data.body(self.ee_id).xquat.copy()
+
+    def body_transform(self, body_id):
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = self.data.xmat[body_id].reshape(3, 3)
+        T[:3, 3] = self.data.xpos[body_id]
+        return T
+
+    def camera_transform(self):
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = self.data.cam_xmat[self.camera_id].reshape(3, 3)
+        T[:3, 3] = self.data.cam_xpos[self.camera_id]
+        return T
+
+    def tag_depths_from_projection(self, tag_ids):
+        cam_R = self.data.cam_xmat[self.camera_id].reshape(3, 3)
+        cam_t = self.data.cam_xpos[self.camera_id].copy()
+        world_R_cam = cam_R.T
+
+        depths = []
+        for tag_id in tag_ids:
+            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, f"hole_tag_{tag_id}")
+            point_world = self.data.xpos[body_id].copy()
+            point_cam = world_R_cam @ (point_world - cam_t)
+            depth = float(-point_cam[2])
+            if depth <= 1e-6:
+                return None
+            depths.append(depth)
+        return np.asarray(depths, dtype=np.float64)
+
+    def finger_contacts_with_pin(self):
+        left_contact = False
+        right_contact = False
+        for i in range(self.data.ncon):
+            contact = self.data.contact[i]
+            if contact.geom1 == self.peg_geom_id:
+                other_geom = contact.geom2
+            elif contact.geom2 == self.peg_geom_id:
+                other_geom = contact.geom1
+            else:
+                continue
+
+            other_body = self.model.geom_bodyid[other_geom]
+            if other_body == self.left_finger_body_id:
+                left_contact = True
+            elif other_body == self.right_finger_body_id:
+                right_contact = True
+        return left_contact, right_contact
+
+    def activate_grasp_weld(self):
+        if self.grasp_weld_id < 0:
+            raise RuntimeError("peg_grasp_weld equality is missing from the model")
+
+        ee_pos, ee_quat = self.ee_pose()
+        peg_pos = self.peg_pos()
+        peg_quat = self.data.xquat[self.peg_body_id].copy()
+
+        ee_quat_inv = np.zeros(4, dtype=np.float64)
+        mujoco.mju_negQuat(ee_quat_inv, ee_quat)
+        rel_quat = np.zeros(4, dtype=np.float64)
+        mujoco.mju_mulQuat(rel_quat, ee_quat_inv, peg_quat)
+
+        ee_rot = self.data.body(self.ee_id).xmat.reshape(3, 3).copy()
+        rel_pos = ee_rot.T @ (peg_pos - ee_pos)
+        # MuJoCo weld equality data stores relpose at [3:10]:
+        # [0:3] is unused/anchor-style data, [3:6] rel_pos, [6:10] rel_quat,
+        # [10] torquescale.
+        self.model.eq_data[self.grasp_weld_id, 3:6] = rel_pos
+        self.model.eq_data[self.grasp_weld_id, 6:10] = rel_quat
+        self.data.eq_active[self.grasp_weld_id] = 1
+        mujoco.mj_forward(self.model, self.data)
+        return rel_pos, rel_quat
+
+    def peg_contacts_hole(self, force_threshold):
+        max_contact_force = 0.0
+        contact_geom_name = None
+        for i in range(self.data.ncon):
+            contact = self.data.contact[i]
+            if contact.geom1 == self.peg_geom_id:
+                other_geom = contact.geom2
+            elif contact.geom2 == self.peg_geom_id:
+                other_geom = contact.geom1
+            else:
+                continue
+
+            other_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, other_geom) or ""
+            if other_name.startswith("hole_"):
+                contact_force = np.zeros(6, dtype=np.float64)
+                mujoco.mj_contactForce(self.model, self.data, i, contact_force)
+                force_norm = float(np.linalg.norm(contact_force[:3]))
+                if force_norm > max_contact_force:
+                    max_contact_force = force_norm
+                    contact_geom_name = other_name
+        return max_contact_force > force_threshold, contact_geom_name, max_contact_force
+
+    def peg_insert_depth_error(self, xy_tol, z_tol):
+        peg_bottom = self.data.site_xpos[self.peg_bottom_site_id].copy()
+        hole_depth = self.data.site_xpos[self.hole_bottom_site_id].copy()
+        delta = peg_bottom - hole_depth
+        xy_error = float(np.linalg.norm(delta[:2]))
+        z_error = float(delta[2])
+        inserted = xy_error < xy_tol and z_error <= z_tol
+        return inserted, xy_error, z_error, delta, peg_bottom, hole_depth
+
+    def read_sensor_vec3(self, sensor_id):
+        if sensor_id < 0:
+            return np.zeros(3, dtype=np.float64)
+        adr = self.model.sensor_adr[sensor_id]
+        dim = self.model.sensor_dim[sensor_id]
+        if dim != 3:
+            raise ValueError(f"Expected 3D sensor, got sensor_id={sensor_id}, dim={dim}")
+        return self.data.sensordata[adr:adr + dim].copy()
+
+    def ee_force(self):
+        return self.read_sensor_vec3(self.ee_force_sensor_id)
+
+    def force_to_world(self, force):
+        if self.ee_force_site_id >= 0:
+            sensor_rot = self.data.site_xmat[self.ee_force_site_id].reshape(3, 3)
+        else:
+            sensor_rot = self.data.body(self.ee_id).xmat.reshape(3, 3)
+        return sensor_rot @ np.asarray(force, dtype=np.float64)
+
+
 class PegInHoleGraspDemo(ArmBaseViewer):
     def __init__(self, render_path):
         super().__init__(render_path, render_path)
+        self.control_config = ControlConfig()
+        self.grasp_config = GraspConfig()
+        self.observation_config = ObservationConfig()
+        self.ibvs_config = IBVSConfig()
+        self.insert_config = InsertConfig()
+        self.task_scene = PegInHoleScene(self.model, self.data, self.ee_id, self.camera_id)
+
         self.state = GraspState.PLAN
         self.state_step = 0
         self.pose_targets = {}
         self.approach_q_path = []
         self.descend_q_path = []
         self.lift_q_path = []
-        self.grasp_rot = euler2rotmat(np.pi, 0.0, CAMERA_CLOCKWISE_YAW_OFFSET)
-        self.target_tag_pixels = self._load_target_tag_pixels(IBVS_TARGET_PIXELS_PATH)
-        self.tag_detector = AprilTagPoseEstimator(TAG_IDS)
+        self.grasp_rot = euler2rotmat(np.pi, 0.0, self.grasp_config.camera_clockwise_yaw_offset)
+        self.target_tag_pixels = self._load_target_tag_pixels(self.ibvs_config.target_pixels_path)
+        self.tag_detector = AprilTagPoseEstimator(self.ibvs_config.tag_ids)
         self.fx, self.fy, self.cx, self.cy = self.calc_intrinsics()
-        self.ibvs = IBVSController(self.fx, self.fy, self.cx, self.cy, gain=0.8, stop_threshold_px=8.0)
+        self.ibvs = IBVSController(
+            self.fx,
+            self.fy,
+            self.cx,
+            self.cy,
+            gain=self.ibvs_config.gain,
+            stop_threshold_px=self.ibvs_config.stop_threshold_px,
+        )
         self._set_ibvs_target_pixels()
         self.T_MJ_CAMERA_FROM_CV_CAMERA = np.eye(4, dtype=np.float64)
         self.T_MJ_CAMERA_FROM_CV_CAMERA[:3, :3] = np.diag([1.0, -1.0, -1.0])
@@ -222,25 +451,18 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             self.data,
             gripper_command=self._gripper_command_for_state,
         )
-        self.approach_follower = PositionJointPathFollower(self.arm_controller, PATH_WAYPOINT_TOL)
-        self.descend_follower = PositionJointPathFollower(self.arm_controller, PATH_WAYPOINT_TOL)
-        self.lift_follower = PositionJointPathFollower(self.arm_controller, PATH_WAYPOINT_TOL)
-        self.peg_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "peg_body")
-        self.hole_base_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "hole_base")
-        self.peg_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "peg_collision")
-        self.peg_grasp_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "peg_grasp_site")
-        self.peg_top_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "peg_top_site")
-        self.peg_bottom_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "peg_bottom_site")
-        self.hole_bottom_site_id = mujoco.mj_name2id(
-            self.model,
-            mujoco.mjtObj.mjOBJ_SITE,
-            "hole_bottom_site",
+        self.approach_follower = PositionJointPathFollower(
+            self.arm_controller,
+            self.control_config.path_waypoint_tol,
         )
-        self.grasp_weld_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_EQUALITY, "peg_grasp_weld")
-        self.ee_force_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "ee_force")
-        self.ee_force_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "ee_center_site")
-        self.left_finger_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "left_finger")
-        self.right_finger_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "right_finger")
+        self.descend_follower = PositionJointPathFollower(
+            self.arm_controller,
+            self.control_config.path_waypoint_tol,
+        )
+        self.lift_follower = PositionJointPathFollower(
+            self.arm_controller,
+            self.control_config.path_waypoint_tol,
+        )
         self.grasp_failed_reported = False
         if self.kinematics.EE_FRAME_ID != self.kinematics.FRAME_ID:
             self.kinematics.FRAME_ID = self.kinematics.EE_FRAME_ID
@@ -254,9 +476,9 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             mujoco.mj_resetDataKeyframe(self.model, self.data, home_id)
         mujoco.mj_forward(self.model, self.data)
         self.arm_controller.move_to_joint(self.data.qpos[:7].copy())
-        self.arm_controller.set_gripper(GRIPPER_OPEN)
-        if self.grasp_weld_id >= 0:
-            self.data.eq_active[self.grasp_weld_id] = 0
+        self.arm_controller.set_gripper(self.grasp_config.gripper_open)
+        if self.task_scene.grasp_weld_id >= 0:
+            self.data.eq_active[self.task_scene.grasp_weld_id] = 0
         mujoco.mj_forward(self.model, self.data)
         print("[Start] plan -> grasp -> random observation -> IBVS align -> insert")
 
@@ -284,30 +506,37 @@ class PegInHoleGraspDemo(ArmBaseViewer):
                 raise ValueError(f"Tag {tag_id} pixel must be [u, v], got shape={pixel.shape}")
             targets[tag_id] = pixel
 
-        missing_ids = [tag_id for tag_id in TAG_IDS if tag_id not in targets]
+        missing_ids = [tag_id for tag_id in self.ibvs_config.tag_ids if tag_id not in targets]
         if missing_ids:
             raise ValueError(f"Missing target pixels for tag ids {missing_ids} in {path}")
 
         target_text = ", ".join(
             f"{tag_id}=({targets[tag_id][0]:.1f},{targets[tag_id][1]:.1f})"
-            for tag_id in TAG_IDS
+            for tag_id in self.ibvs_config.tag_ids
         )
         print(f"[IBVS] loaded target pixels from {path}: {target_text}")
         return targets
 
     def _set_ibvs_target_pixels(self):
-        uv = np.asarray([self.target_tag_pixels[tag_id] for tag_id in TAG_IDS], dtype=np.float64)
+        uv = np.asarray(
+            [self.target_tag_pixels[tag_id] for tag_id in self.ibvs_config.tag_ids],
+            dtype=np.float64,
+        )
         self.ibvs.target_u = uv[:, 0].copy()
         self.ibvs.target_v = uv[:, 1].copy()
         self.ibvs.target_z = None
 
     def _make_pose_targets(self):
+        observation_config = self.observation_config
         mujoco.mj_forward(self.model, self.data)
-        grasp = self.data.site_xpos[self.peg_grasp_site_id].copy()
-        hole_base = self.data.xpos[self.hole_base_body_id].copy()
-        hole_approach = hole_base + np.array([0.0, 0.0, HOLE_APPROACH_LOCAL_Z], dtype=np.float64)
-        if not ENABLE_IBVS:
-            self.observation_xy_offset = INSERT_TEST_OFFSET_XY.copy()
+        grasp = self.task_scene.peg_grasp_pos()
+        hole_base = self.task_scene.hole_base_pos()
+        hole_approach = hole_base + np.array(
+            [0.0, 0.0, observation_config.hole_approach_local_z],
+            dtype=np.float64,
+        )
+        if not self.ibvs_config.enabled:
+            self.observation_xy_offset = observation_config.insert_test_offset_xy.copy()
             self.observation_rpy_offset[:] = 0.0
             print(
                 "[Plan] IBVS skipped, direct insert xy offset: "
@@ -316,17 +545,17 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         elif self.observation_xy_offset is None:
             random_offset = np.array(
                 [
-                    self.rng.uniform(*HOLE_OBSERVATION_RANDOM_XY_RANGE[0]),
-                    self.rng.uniform(*HOLE_OBSERVATION_RANDOM_XY_RANGE[1]),
+                    self.rng.uniform(*observation_config.random_xy_range[0]),
+                    self.rng.uniform(*observation_config.random_xy_range[1]),
                 ],
                 dtype=np.float64,
             )
-            self.observation_xy_offset = HOLE_OBSERVATION_OFFSET_XY + random_offset
+            self.observation_xy_offset = observation_config.offset_xy + random_offset
             self.observation_rpy_offset = np.array(
                 [
-                    self.rng.uniform(*HOLE_OBSERVATION_RANDOM_RPY_RANGE[0]),
-                    self.rng.uniform(*HOLE_OBSERVATION_RANDOM_RPY_RANGE[1]),
-                    self.rng.uniform(*HOLE_OBSERVATION_RANDOM_RPY_RANGE[2]),
+                    self.rng.uniform(*observation_config.random_rpy_range[0]),
+                    self.rng.uniform(*observation_config.random_rpy_range[1]),
+                    self.rng.uniform(*observation_config.random_rpy_range[2]),
                 ],
                 dtype=np.float64,
             )
@@ -340,9 +569,13 @@ class PegInHoleGraspDemo(ArmBaseViewer):
                 f"pitch={np.rad2deg(self.observation_rpy_offset[1]):.2f}, "
                 f"yaw={np.rad2deg(self.observation_rpy_offset[2]):.2f}"
             )
-        above = grasp + np.array([0.0, 0.0, APPROACH_CLEARANCE], dtype=np.float64)
+        above = grasp + np.array([0.0, 0.0, self.grasp_config.approach_clearance], dtype=np.float64)
         high_above_hole = hole_approach + np.array(
-            [self.observation_xy_offset[0], self.observation_xy_offset[1], HOLE_OBSERVATION_EXTRA_HEIGHT],
+            [
+                self.observation_xy_offset[0],
+                self.observation_xy_offset[1],
+                observation_config.extra_height,
+            ],
             dtype=np.float64,
         )
         return {
@@ -356,7 +589,7 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         self.pose_targets = pose_targets
 
         safe_above = pose_targets[GraspState.DESCEND] + np.array(
-            [0.0, 0.0, SAFE_APPROACH_CLEARANCE],
+            [0.0, 0.0, self.grasp_config.safe_approach_clearance],
             dtype=np.float64,
         )
         success, q_safe = self.kinematics.ik(self.data.qpos[:7].copy(), self.grasp_rot, safe_above)
@@ -368,20 +601,20 @@ class PegInHoleGraspDemo(ArmBaseViewer):
                 "MOVE_ABOVE_PIN",
                 [safe_above, pose_targets[GraspState.MOVE_ABOVE_PIN]],
                 self.approach_q_path[-1],
-                [APPROACH_STEPS_DOWN],
+                [self.grasp_config.approach_steps_down],
             )
         )
         self.descend_q_path = self._plan_cartesian_path(
             "DESCEND",
             [pose_targets[GraspState.MOVE_ABOVE_PIN], pose_targets[GraspState.DESCEND]],
             self.approach_q_path[-1],
-            [DESCEND_STEPS],
+            [self.grasp_config.descend_steps],
         )
         self.lift_q_path = self._plan_cartesian_path(
             "LIFT",
             [pose_targets[GraspState.DESCEND], pose_targets[GraspState.LIFT]],
             self.descend_q_path[-1],
-            [DESCEND_STEPS],
+            [self.grasp_config.descend_steps],
             rpy_offset_end=self.observation_rpy_offset,
         )
         self._set_state(GraspState.MOVE_ABOVE_PIN)
@@ -406,7 +639,7 @@ class PegInHoleGraspDemo(ArmBaseViewer):
                 target_rot = euler2rotmat(
                     np.pi + rpy_offset[0],
                     rpy_offset[1],
-                    CAMERA_CLOCKWISE_YAW_OFFSET + rpy_offset[2],
+                    self.grasp_config.camera_clockwise_yaw_offset + rpy_offset[2],
                 )
                 success, q_target = self.kinematics.ik(q_seed, target_rot, pos)
                 if not success:
@@ -463,8 +696,8 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             ee_pos, _ = self._get_ee_pose()
             print(f"[停止] 原因：{self.insert_stop_reason}，保持当前位置 ee={format_vec(ee_pos)}")
         if state == GraspState.RELEASE_GRIPPER:
-            if self.grasp_weld_id >= 0:
-                self.data.eq_active[self.grasp_weld_id] = 0
+            if self.task_scene.grasp_weld_id >= 0:
+                self.data.eq_active[self.task_scene.grasp_weld_id] = 0
             print(f"[松手] 原因：{self.insert_stop_reason}，松开夹爪")
         if state == GraspState.RETREAT_ABORT:
             print(f"[停止] 原因：{self.insert_stop_reason}，回到下探起点")
@@ -491,7 +724,7 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             if result is not None:
                 line += f" q_err_norm={result.q_err_norm:.4f}"
             if include_pin:
-                line += f" pin={format_vec(self.data.xpos[self.peg_body_id])}"
+                line += f" pin={format_vec(self.task_scene.peg_pos())}"
             print(line)
         return done
 
@@ -504,13 +737,13 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             GraspState.INSERT_HOLD,
             GraspState.RETREAT_ABORT,
         ):
-            return GRIPPER_CLOSE
+            return self.grasp_config.gripper_close
         if self.state == GraspState.DONE and not self.insert_succeeded:
-            return GRIPPER_CLOSE
-        return GRIPPER_OPEN
+            return self.grasp_config.gripper_close
+        return self.grasp_config.gripper_open
 
     def _close_gripper_until_contact(self):
-        self._servo_to_joint_target(self.descend_q_path[-1], JOINT_REACHED_TOL)
+        self._servo_to_joint_target(self.descend_q_path[-1], self.control_config.joint_reached_tol)
         self.state_step += 1
         left_contact, right_contact = self._finger_contacts_with_pin()
         if self.print_counter % 50 == 0 or self.state_step == 1:
@@ -518,11 +751,15 @@ class PegInHoleGraspDemo(ArmBaseViewer):
                 "[Grasp] closing: "
                 f"step={self.state_step} "
                 f"left_contact={left_contact} right_contact={right_contact} "
-                f"pin_pos={format_vec(self.data.xpos[self.peg_body_id])}"
+                f"pin_pos={format_vec(self.task_scene.peg_pos())}"
             )
 
-        contact_ready = left_contact and right_contact and self.state_step >= GRIPPER_CLOSE_MIN_STEPS
-        timed_out = self.state_step >= GRIPPER_CLOSE_TIMEOUT_STEPS
+        contact_ready = (
+            left_contact
+            and right_contact
+            and self.state_step >= self.grasp_config.close_min_steps
+        )
+        timed_out = self.state_step >= self.grasp_config.close_timeout_steps
         if contact_ready:
             self._activate_grasp_weld()
             self._set_state(GraspState.LIFT)
@@ -531,69 +768,20 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             self.grasp_failed_reported = True
 
     def _activate_grasp_weld(self):
-        if self.grasp_weld_id < 0:
-            raise RuntimeError("peg_grasp_weld equality is missing from the model")
-
-        ee_pos, ee_quat = self._get_ee_pose()
-        peg_pos = self.data.xpos[self.peg_body_id].copy()
-        peg_quat = self.data.xquat[self.peg_body_id].copy()
-
-        ee_quat_inv = np.zeros(4, dtype=np.float64)
-        mujoco.mju_negQuat(ee_quat_inv, ee_quat)
-        rel_quat = np.zeros(4, dtype=np.float64)
-        mujoco.mju_mulQuat(rel_quat, ee_quat_inv, peg_quat)
-
-        ee_rot = self.data.body(self.ee_id).xmat.reshape(3, 3).copy()
-        rel_pos = ee_rot.T @ (peg_pos - ee_pos)
-        # MuJoCo weld equality data stores relpose at [3:10]:
-        # [0:3] is unused/anchor-style data, [3:6] rel_pos, [6:10] rel_quat,
-        # [10] torquescale.
-        self.model.eq_data[self.grasp_weld_id, 3:6] = rel_pos
-        self.model.eq_data[self.grasp_weld_id, 6:10] = rel_quat
-        self.data.eq_active[self.grasp_weld_id] = 1
-        mujoco.mj_forward(self.model, self.data)
+        rel_pos, rel_quat = self.task_scene.activate_grasp_weld()
         print(
             "[Grasp] weld activated: "
             f"rel_pos={format_vec(rel_pos)} rel_quat={format_vec(rel_quat)}"
         )
 
     def _finger_contacts_with_pin(self):
-        left_contact = False
-        right_contact = False
-        for i in range(self.data.ncon):
-            contact = self.data.contact[i]
-            if contact.geom1 == self.peg_geom_id:
-                other_geom = contact.geom2
-            elif contact.geom2 == self.peg_geom_id:
-                other_geom = contact.geom1
-            else:
-                continue
-
-            other_body = self.model.geom_bodyid[other_geom]
-            if other_body == self.left_finger_body_id:
-                left_contact = True
-            elif other_body == self.right_finger_body_id:
-                right_contact = True
-        return left_contact, right_contact
+        return self.task_scene.finger_contacts_with_pin()
 
     def _get_ee_pose(self):
-        return self.data.body(self.ee_id).xpos.copy(), self.data.body(self.ee_id).xquat.copy()
+        return self.task_scene.ee_pose()
 
     def _tag_depths_from_projection(self):
-        cam_R = self.data.cam_xmat[self.camera_id].reshape(3, 3)
-        cam_t = self.data.cam_xpos[self.camera_id].copy()
-        world_R_cam = cam_R.T
-
-        depths = []
-        for tag_id in TAG_IDS:
-            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, f"hole_tag_{tag_id}")
-            point_world = self.data.xpos[body_id].copy()
-            point_cam = world_R_cam @ (point_world - cam_t)
-            depth = float(-point_cam[2])
-            if depth <= 1e-6:
-                return None
-            depths.append(depth)
-        return np.asarray(depths, dtype=np.float64)
+        return self.task_scene.tag_depths_from_projection(self.ibvs_config.tag_ids)
 
     def _features_from_detections(self, detections_by_id):
         depths = self._tag_depths_from_projection()
@@ -601,22 +789,16 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             return None
 
         centers = np.asarray(
-            [detections_by_id[tag_id].center for tag_id in TAG_IDS],
+            [detections_by_id[tag_id].center for tag_id in self.ibvs_config.tag_ids],
             dtype=np.float64,
         )
         return ImageFeatures(uv=centers, z=depths)
 
     def _get_body_transform(self, body_id):
-        T = np.eye(4, dtype=np.float64)
-        T[:3, :3] = self.data.xmat[body_id].reshape(3, 3)
-        T[:3, 3] = self.data.xpos[body_id]
-        return T
+        return self.task_scene.body_transform(body_id)
 
     def _get_camera_transform(self):
-        T = np.eye(4, dtype=np.float64)
-        T[:3, :3] = self.data.cam_xmat[self.camera_id].reshape(3, 3)
-        T[:3, 3] = self.data.cam_xpos[self.camera_id]
-        return T
+        return self.task_scene.camera_transform()
 
     def _camera_optical_velocity_to_ee(self, v_cam_cv):
         T_world_ee = self._get_body_transform(self.ee_id)
@@ -644,7 +826,11 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         J_ee = self._end_effector_jacobian()
         damping_matrix = DLS_DAMPING * DLS_DAMPING * np.eye(6)
         q_dot = J_ee.T @ np.linalg.solve(J_ee @ J_ee.T + damping_matrix, v_ee)
-        return np.clip(q_dot, -JOINT_SPEED_LIMIT, JOINT_SPEED_LIMIT), J_ee
+        return np.clip(
+            q_dot,
+            -self.control_config.joint_speed_limit,
+            self.control_config.joint_speed_limit,
+        ), J_ee
 
     def _write_joint_position_target(self, q_target):
         q_target = np.asarray(q_target, dtype=np.float64)
@@ -665,15 +851,19 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             self.joint_position_target = q.copy()
 
         tracking_error = self.joint_position_target - q
-        if np.linalg.norm(tracking_error) > POSITION_TARGET_TRACKING_LIMIT:
+        if np.linalg.norm(tracking_error) > self.control_config.position_target_tracking_limit:
             self.joint_position_target = q.copy()
 
         dt = float(self.model.opt.timestep)
-        delta_q = np.clip(q_dot, -JOINT_SPEED_LIMIT, JOINT_SPEED_LIMIT) * dt
+        delta_q = np.clip(
+            q_dot,
+            -self.control_config.joint_speed_limit,
+            self.control_config.joint_speed_limit,
+        ) * dt
         return self._write_joint_position_target(self.joint_position_target + delta_q)
 
     def _draw_ibvs_visualization(self, frame, detections_by_id):
-        for tag_id in TAG_IDS:
+        for tag_id in self.ibvs_config.tag_ids:
             target = self.target_tag_pixels[tag_id]
             tu, tv = np.round(target).astype(int)
             cv2.circle(frame, (tu, tv), 7, (0, 0, 255), 2)
@@ -740,10 +930,10 @@ class PegInHoleGraspDemo(ArmBaseViewer):
                 f"q_dot_norm={np.linalg.norm(q_dot):.4f} "
                 f"J_rank={np.linalg.matrix_rank(J_ee)}"
             )
-        if error_norm < IBVS_ALIGNED_THRESHOLD_PX:
+        if error_norm < self.ibvs_config.aligned_threshold_px:
             print(
                 "[IBVS] aligned: "
-                f"error_norm={error_norm:.3f}px < {IBVS_ALIGNED_THRESHOLD_PX:.1f}px"
+                f"error_norm={error_norm:.3f}px < {self.ibvs_config.aligned_threshold_px:.1f}px"
             )
             self._set_state(GraspState.INSERT_DESCEND)
 
@@ -753,82 +943,51 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         if not success:
             print(f"[Insert] IK failed: target_pos={format_vec(target_pos)}")
             return False
-        self.arm_controller.move_to_joint(q_target, PATH_WAYPOINT_TOL)
+        self.arm_controller.move_to_joint(q_target, self.control_config.path_waypoint_tol)
         return True
 
     def _peg_contacts_hole(self):
-        max_contact_force = 0.0
-        contact_geom_name = None
-        for i in range(self.data.ncon):
-            contact = self.data.contact[i]
-            if contact.geom1 == self.peg_geom_id:
-                other_geom = contact.geom2
-            elif contact.geom2 == self.peg_geom_id:
-                other_geom = contact.geom1
-            else:
-                continue
-
-            other_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, other_geom) or ""
-            if other_name.startswith("hole_"):
-                contact_force = np.zeros(6, dtype=np.float64)
-                mujoco.mj_contactForce(self.model, self.data, i, contact_force)
-                force_norm = float(np.linalg.norm(contact_force[:3]))
-                if force_norm > max_contact_force:
-                    max_contact_force = force_norm
-                    contact_geom_name = other_name
-        return max_contact_force > INSERT_CONTACT_FORCE_THRESHOLD, contact_geom_name, max_contact_force
+        return self.task_scene.peg_contacts_hole(self.insert_config.contact_force_threshold)
 
     def _peg_insert_depth_error(self):
-        peg_bottom = self.data.site_xpos[self.peg_bottom_site_id].copy()
-        hole_depth = self.data.site_xpos[self.hole_bottom_site_id].copy()
-        delta = peg_bottom - hole_depth
-        xy_error = float(np.linalg.norm(delta[:2]))
-        z_error = float(delta[2])
-        inserted = xy_error < INSERT_DEPTH_XY_TOL and z_error <= INSERT_DEPTH_Z_TOL
-        return inserted, xy_error, z_error, delta, peg_bottom, hole_depth
+        return self.task_scene.peg_insert_depth_error(
+            self.insert_config.depth_xy_tol,
+            self.insert_config.depth_z_tol,
+        )
 
     def _read_sensor_vec3(self, sensor_id):
-        if sensor_id < 0:
-            return np.zeros(3, dtype=np.float64)
-        adr = self.model.sensor_adr[sensor_id]
-        dim = self.model.sensor_dim[sensor_id]
-        if dim != 3:
-            raise ValueError(f"Expected 3D sensor, got sensor_id={sensor_id}, dim={dim}")
-        return self.data.sensordata[adr:adr + dim].copy()
+        return self.task_scene.read_sensor_vec3(sensor_id)
 
     def _ee_force(self):
-        return self._read_sensor_vec3(self.ee_force_sensor_id)
+        return self.task_scene.ee_force()
 
     def _insert_force_delta(self):
         return self._ee_force() - self.insert_force_bias
 
     def _force_to_world(self, force):
-        if self.ee_force_site_id >= 0:
-            sensor_rot = self.data.site_xmat[self.ee_force_site_id].reshape(3, 3)
-        else:
-            sensor_rot = self.data.body(self.ee_id).xmat.reshape(3, 3)
-        return sensor_rot @ np.asarray(force, dtype=np.float64)
+        return self.task_scene.force_to_world(force)
 
     def _update_insert_xy_admittance(self, force_delta_world):
+        insert_config = self.insert_config
         dt = float(self.model.opt.timestep)
-        force_xy = INSERT_ADMITTANCE_FORCE_SIGN * np.asarray(force_delta_world[:2], dtype=np.float64)
+        force_xy = insert_config.admittance_force_sign * np.asarray(force_delta_world[:2], dtype=np.float64)
         acceleration_xy = (
             force_xy
-            - INSERT_ADMITTANCE_D * self.insert_admittance_velocity_xy
-            - INSERT_ADMITTANCE_K * self.insert_admittance_offset_xy
-        ) / INSERT_ADMITTANCE_M
+            - insert_config.admittance_d * self.insert_admittance_velocity_xy
+            - insert_config.admittance_k * self.insert_admittance_offset_xy
+        ) / insert_config.admittance_m
 
         self.insert_admittance_velocity_xy += acceleration_xy * dt
         self.insert_admittance_velocity_xy = np.clip(
             self.insert_admittance_velocity_xy,
-            -INSERT_ADMITTANCE_MAX_VELOCITY,
-            INSERT_ADMITTANCE_MAX_VELOCITY,
+            -insert_config.admittance_max_velocity,
+            insert_config.admittance_max_velocity,
         )
         self.insert_admittance_offset_xy += self.insert_admittance_velocity_xy * dt
         self.insert_admittance_offset_xy = np.clip(
             self.insert_admittance_offset_xy,
-            -INSERT_ADMITTANCE_MAX_OFFSET,
-            INSERT_ADMITTANCE_MAX_OFFSET,
+            -insert_config.admittance_max_offset,
+            insert_config.admittance_max_offset,
         )
         return self.insert_admittance_offset_xy.copy()
 
@@ -840,7 +999,8 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         contact, contact_geom, contact_force_norm = self._peg_contacts_hole()
         force_delta = self._insert_force_delta()
         force_delta_world = self._force_to_world(force_delta)
-        if ENABLE_INSERT_ADMITTANCE and contact:
+        insert_config = self.insert_config
+        if insert_config.enable_admittance and contact:
             self.insert_admittance_active = True
         if self.insert_admittance_active:
             admittance_xy = self._update_insert_xy_admittance(force_delta_world)
@@ -853,10 +1013,10 @@ class PegInHoleGraspDemo(ArmBaseViewer):
         inserted, xy_error, z_error, bottom_delta, peg_bottom, hole_depth = self._peg_insert_depth_error()
         descended = float(self.insert_start_pos[2] - self.data.body(self.ee_id).xpos[2])
         contact_label = contact_geom if contact else "none"
-        z_step_scale = np.clip(1.0 - z_force / INSERT_FORCE_THRESHOLD, 0.0, 1.0)
-        if ENABLE_INSERT_ADMITTANCE and contact:
-            z_step_scale *= INSERT_CONTACT_DESCEND_SCALE
-        z_step = INSERT_DESCEND_STEP * z_step_scale
+        z_step_scale = np.clip(1.0 - z_force / insert_config.force_threshold, 0.0, 1.0)
+        if insert_config.enable_admittance and contact:
+            z_step_scale *= insert_config.contact_descend_scale
+        z_step = insert_config.descend_step * z_step_scale
         print(
             f"[Insert] ee_force={format_vec(force)} "
             f"force_delta={format_vec(force_delta)} "
@@ -867,7 +1027,7 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             f"xy_err={xy_error:.4f} "
             f"contact={contact_label}"
         )
-        if not ENABLE_INSERT_ADMITTANCE and contact:
+        if not insert_config.enable_admittance and contact:
             self.insert_stop_reason = "检测到碰撞且导纳关闭"
             print(
                 "[InsertTest] contact detected, holding current pose: "
@@ -887,7 +1047,7 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             )
             self._set_state(GraspState.RELEASE_GRIPPER)
             return
-        if descended >= INSERT_MAX_DESCEND:
+        if descended >= insert_config.max_descend:
             self.insert_stop_reason = "达到最大下探深度但未确认插入到位"
             print(
                 "[Insert] max descend reached without confirmed insertion: "
@@ -903,19 +1063,25 @@ class PegInHoleGraspDemo(ArmBaseViewer):
     def _hold_insert_pose_step(self):
         if self.joint_position_target is None:
             self.joint_position_target = self.data.qpos[:7].copy()
-        self.arm_controller.move_to_joint(self.joint_position_target, JOINT_REACHED_TOL)
+        self.arm_controller.move_to_joint(
+            self.joint_position_target,
+            self.control_config.joint_reached_tol,
+        )
 
     def _release_gripper_step(self):
-        self.arm_controller.set_gripper(GRIPPER_OPEN)
+        self.arm_controller.set_gripper(self.grasp_config.gripper_open)
         self.state_step += 1
-        if self.state_step >= RELEASE_OPEN_STEPS:
+        if self.state_step >= self.insert_config.release_open_steps:
             self._set_state(GraspState.RETREAT_AFTER_RELEASE)
 
     def _retreat_after_release_step(self):
         if self.insert_start_q is None:
             self._set_state(GraspState.DONE)
             return
-        result = self.arm_controller.move_to_joint(self.insert_start_q, JOINT_REACHED_TOL)
+        result = self.arm_controller.move_to_joint(
+            self.insert_start_q,
+            self.control_config.joint_reached_tol,
+        )
         if result.reached:
             self._set_state(GraspState.DONE)
 
@@ -934,7 +1100,7 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             self._close_gripper_until_contact()
         elif self.state == GraspState.LIFT:
             if self._follow_joint_path("LIFT_LINEAR", self.lift_follower, include_pin=True):
-                if not ENABLE_IBVS:
+                if not self.ibvs_config.enabled:
                     print("[IBVS] skipped for insert test, starting insert descend")
                     self._set_state(GraspState.INSERT_DESCEND)
                 else:
@@ -953,7 +1119,10 @@ class PegInHoleGraspDemo(ArmBaseViewer):
             self._retreat_after_release_step()
         elif self.state == GraspState.DONE:
             if self.insert_start_q is not None:
-                self.arm_controller.move_to_joint(self.insert_start_q, JOINT_REACHED_TOL)
+                self.arm_controller.move_to_joint(
+                    self.insert_start_q,
+                    self.control_config.joint_reached_tol,
+                )
 
         self.print_counter += 1
 
