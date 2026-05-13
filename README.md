@@ -24,6 +24,14 @@ pip install -r requirements.txt
   - 操作：先点击/聚焦 `Manual Control Camera` 窗口。
   - 按键：`Tab` 切换 `JOINT/CART` 模式；`JOINT` 模式下 `1`-`7` 分别增加对应关节角，`g` 闭合夹爪，`h` 张开夹爪；`CART` 模式下方向键移动末端 `X/Y`，`PageUp/PageDown` 移动末端 `Z`。
 
+### 运动学分析
+
+- `python src/jacobian_singularity_demo.py`
+  - 功能：实时计算并显示末端雅可比的奇异值、最小奇异值、rank、条件数、可操作度、最差运动方向、null-space 方向、DLS 与伪逆对比、manipulability ellipsoid，以及 `v = J(q) qdot` 得到的末端线速度/角速度。
+  - 操作：MuJoCo viewer 用于观察机械臂姿态，`Jacobian Singularity` OpenCV 窗口显示指标。
+  - 按键：先点击/聚焦 OpenCV 窗口；`Space` 切换自动运动/保持当前姿态，`R` 重置到初始姿态。
+  - 可选参数：`--hold` 表示启动后保持初始姿态，便于观察静态指标。
+
 ### 力控示例
 
 - `python src/joint_impedance_control.py`
@@ -94,6 +102,26 @@ python src/bc_grasp.py
 - `python src/peg_in_hole/grasp_pin_demo.py`
   - 功能：完整插孔流程：规划抓取 peg、闭合夹爪、抬起、通过 IBVS 对准孔位、下探插入、松爪撤回。
   - 操作：流程自动执行，无需键盘控制；MuJoCo viewer 鼠标调整视角，OpenCV 相机窗口显示 tag 对准过程。
+
+## 后续 TODO
+
+这些 Demo 用来补齐机械臂学习中“为什么这样动、怎样动得更稳、更安全、更可解释”的部分。
+
+- `src/traj_time_scaling_demo.py`
+  - 主题：轨迹时间参数化。
+  - 目标：对比关节线性插值、梯形速度曲线、五次多项式或 S 曲线；画出位置、速度、加速度曲线，观察末端运动平滑性。
+
+- `src/computed_torque_control.py`
+  - 主题：动力学控制与计算力矩控制。
+  - 目标：基于 `M(q)qdd + C(q,qd)qd + g(q) = tau` 跟踪关节轨迹，对比普通 PD 和 computed torque 的跟踪误差。
+
+- `src/operational_space_control.py`
+  - 主题：任务空间控制。
+  - 目标：在末端空间直接跟踪位置/姿态或圆形轨迹，并加入 null-space 姿态稳定项，理解任务空间控制和冗余机械臂的零空间控制。
+
+- `src/collision_avoidance_planning_demo.py`
+  - 主题：碰撞检测、关节限位和避障规划。
+  - 目标：在桌面上加入障碍物，对比直线 MoveL 规划失败和 RRT/OMPL 绕障成功，建立“IK 可达不等于路径安全”的概念。
 
 ## 目录说明
 
