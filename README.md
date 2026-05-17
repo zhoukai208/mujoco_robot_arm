@@ -26,6 +26,11 @@ pip install -r requirements.txt
 
 ### 运动学分析
 
+- `python src/traj_time_scaling_demo.py`
+  - 功能：对同一条 MoveJ 关节空间直线路径分别应用线性、梯形速度曲线、五次多项式和 S 曲线时间参数化；记录并对比 `q/dq/ddq`。
+  - 输出：默认保存到 `artifacts/trajectory_time_scaling/`，包含 CSV、NPZ 和 `q/dq/ddq` 对比图。
+  - 可选参数：`--methods linear trapezoidal quintic s_curve` 选择规划方式；`--duration 3.0` 设置轨迹时长；`--dt 0.01` 设置采样周期；`--show` 显示曲线窗口。
+
 - `python src/jacobian_singularity_demo.py`
   - 功能：实时计算并显示末端雅可比的奇异值、最小奇异值、rank、条件数、可操作度、最差运动方向、null-space 方向、DLS 与伪逆对比、manipulability ellipsoid，以及 `v = J(q) qdot` 得到的末端线速度/角速度。
   - 操作：MuJoCo viewer 用于观察机械臂姿态，`Jacobian Singularity` OpenCV 窗口显示指标。
@@ -106,10 +111,6 @@ python src/bc_grasp.py
 ## 后续 TODO
 
 这些 Demo 用来补齐机械臂学习中“为什么这样动、怎样动得更稳、更安全、更可解释”的部分。
-
-- `src/traj_time_scaling_demo.py`
-  - 主题：轨迹时间参数化。
-  - 目标：对比关节线性插值、梯形速度曲线、五次多项式或 S 曲线；画出位置、速度、加速度曲线，观察末端运动平滑性。
 
 - `src/computed_torque_control.py`
   - 主题：动力学控制与计算力矩控制。
