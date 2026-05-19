@@ -3,121 +3,121 @@
 这个脚本用于观察机械臂在不同姿态下的雅可比矩阵性质。窗口左侧是
 eye-in-hand 相机图像，右侧 HUD 分三列显示数值指标。
 
-左列：Jacobian 基础指标
+左列:Jacobian 基础指标
 
-- q：
+- q:
   当前 7 个关节角，单位 rad。
 
-- qdot：
+- qdot:
   当前 7 个关节速度，单位 rad/s。
 
-- 6D Jacobian J [linear; angular]：
-  完整末端雅可比，满足：
+- 6D Jacobian J [linear; angular]:
+  完整末端雅可比，满足:
       [vx, vy, vz, wx, wy, wz] = J(q) qdot
   前三维是末端线速度，后三维是末端角速度。
 
-- sigma：
+- sigma:
   Jacobian 的奇异值。每个奇异值表示关节速度映射到某个末端运动方向
   的能力；越大表示该方向越容易动，越小表示越难动。
 
-- rank：
+- rank:
   Jacobian 的秩。6D Jacobian 满秩是 6/6，位置 Jacobian 满秩是 3/3。
   如果 rank 下降，说明末端某些方向已经失去或近似失去运动能力。
 
-- min sigma：
+- min sigma:
   最小奇异值，是判断奇异点最直观的指标。越接近 0，越接近奇异姿态。
 
-- condition：
+- condition:
   条件数，约等于 最大奇异值 / 最小奇异值。值越大，表示运动能力越
   不均匀；接近奇异点时通常会变得很大。
 
-- manipulability：
+- manipulability:
   可操作度，这里用奇异值乘积表示。越大表示当前姿态附近越灵活；
   越接近 0，越接近奇异或运动能力退化。
 
-- worst twist：
+- worst twist:
   6D 末端最差运动方向，也就是最小奇异值对应的方向，包含线速度和
   角速度分量。
 
-- Position Jacobian Jv：
-  只看末端位置运动的雅可比，即 J 的前三行：
+- Position Jacobian Jv:
+  只看末端位置运动的雅可比，即 J 的前三行:
       [vx, vy, vz] = Jv(q) qdot
   它更适合理解 reach、轨迹跟踪、抓取接近等只关心末端位置的任务。
 
-- worst xyz：
+- worst xyz:
   末端位置最差运动方向。例如该方向接近 [0, 0, 1] 时，说明当前姿态
   下沿 Z 方向移动比较困难。
 
-中列：末端速度、Null Space、DLS
+中列:末端速度、Null Space、DLS
 
-- End-effector velocity：
+- End-effector velocity:
   当前真实仿真状态下，由 J(q) qdot 算出来的末端速度。
 
-- linear m/s：
+- linear m/s:
   末端线速度 [vx, vy, vz]，单位 m/s。
 
-- angular rad/s：
+- angular rad/s:
   末端角速度 [wx, wy, wz]，单位 rad/s。
 
-- |linear| / |angular|：
+- |linear| / |angular|:
   线速度大小和角速度大小。
 
-- 6D null-space direction：
+- 6D null-space direction:
   6D 任务的零空间方向。
 
-- n：
-  一个 7 维关节速度方向。理论上如果 qdot = n，则：
+- n:
+  一个 7 维关节速度方向。理论上如果 qdot = n，则:
       J(q) n ~= 0
   也就是关节在动，但末端 6D 位姿几乎不动。这是 7 自由度机械臂冗余性
   的来源。
 
-- ||J n||：
+- ||J n||:
   验证 null-space 的残差。越接近 0，说明这个方向越是真正的零空间方向。
 
-- Pseudo-inverse vs DLS：
+- Pseudo-inverse vs DLS:
   普通伪逆和阻尼最小二乘（Damped Least Squares）的对比。
 
-- lambda：
+- lambda:
   DLS 的阻尼系数。阻尼越大，越不容易在奇异点附近产生巨大关节速度，
   但末端跟踪误差也会变大。
 
-- target twist：
+- target twist:
   用于测试的目标末端速度方向。这里选择 worst twist，也就是最难实现
   的方向。
 
-- ||qdot_pinv||：
+- ||qdot_pinv||:
   用普通伪逆求出的关节速度大小。接近奇异点时，这个值可能暴涨。
 
-- ||qdot_dls||：
+- ||qdot_dls||:
   用 DLS 求出的关节速度大小。通常比伪逆更小、更稳定。
 
-- twist err pinv / twist err dls：
+- twist err pinv / twist err dls:
   伪逆和 DLS 方法产生的末端速度误差。DLS 通常牺牲一点精度，换取
   更小的关节速度和更稳定的控制。
 
-右列：Manipulability Ellipsoid
+右列:Manipulability Ellipsoid
 
-- Manipulability ellipsoid：
-  位置可操作椭球的 XY 投影。它表示当前姿态下，如果关节速度大小受限：
+- Manipulability ellipsoid:
+  位置可操作椭球的 XY 投影。它表示当前姿态下，如果关节速度大小受限:
       ||qdot|| <= 1
   末端线速度大概能覆盖哪些方向。
 
   椭圆越圆，说明各方向运动能力越均匀；椭圆越扁，说明某些方向很好动、
   某些方向很难动；某个轴很短时，说明对应方向接近退化。
 
-- 3D radii：
+- 3D radii:
   位置可操作椭球三个主轴长度，对应位置 Jacobian 的 3 个奇异值。
 
-- major=cyan：
+- major=cyan:
   最长主轴方向，即当前最容易产生末端线速度的方向。
 
-- minor=orange：
+- minor=orange:
   较短主轴方向，即较困难的运动方向之一。
 
-- Green outline：
+- Green outline:
   XY 投影下的速度椭圆轮廓。
 
-快速判断规则：
+快速判断规则:
 
 - min sigma 越小，越接近奇异。
 - condition 越大，越不稳定。
@@ -161,7 +161,7 @@ class DlsComparison:
 class ManipulabilityEllipsoid:
     """位置可操作椭球。
 
-    对位置雅可比 Jv 做 SVD：
+    对位置雅可比 Jv 做 SVD:
         Jv = U * S * V^T
 
     当关节速度满足 ||qdot|| <= 1 时，末端可达线速度集合近似为
@@ -176,11 +176,11 @@ class ManipulabilityEllipsoid:
 class JacobianMetrics:
     """一次 Jacobian 分析的结果。
 
-    这里同时保留 6D Jacobian 和位置 Jacobian 的指标：
+    这里同时保留 6D Jacobian 和位置 Jacobian 的指标:
     - 6D Jacobian: 同时考虑末端线速度和角速度，维度是 6x7。
     - Position Jacobian: 只看末端位置速度，维度是 3x7。
 
-    两者都值得看：位置控制更关心 Jv，完整任务空间控制更关心 6D J。
+    两者都值得看:位置控制更关心 Jv，完整任务空间控制更关心 6D J。
     """
 
     singular_values_6d: np.ndarray
@@ -215,7 +215,7 @@ class JacobianAnalyzer:
         q = np.asarray(q, dtype=np.float64).flatten()
         qdot = np.asarray(qdot, dtype=np.float64).flatten()
 
-        # PandaKinematics.J(q) 返回末端几何雅可比：
+        # PandaKinematics.J(q) 返回末端几何雅可比:
         #   twist = [linear_velocity, angular_velocity] = J(q) @ qdot
         # 对 7 自由度机械臂来说，J 的形状是 6x7。
         J = self.kinematics.J(q)
@@ -244,7 +244,7 @@ class JacobianAnalyzer:
         nullspace_direction = self._normalize(nullspace_direction)
         nullspace_residual = float(np.linalg.norm(J @ nullspace_direction))
 
-        # DLS 对比：用最差 6D 方向作为目标 twist。
+        # DLS 对比:用最差 6D 方向作为目标 twist。
         # 伪逆在这个方向上最容易放大关节速度；DLS 会牺牲一点精度换稳定。
         dls_comparison = self._compare_dls(J, worst_twist_direction)
 
@@ -253,7 +253,7 @@ class JacobianAnalyzer:
             radii=s_pos.copy(),
         )
 
-        # 直接验证核心公式：末端速度 = 雅可比 * 关节速度。
+        # 直接验证核心公式:末端速度 = 雅可比 * 关节速度。
         # 前 3 维是线速度，后 3 维是角速度。
         ee_twist = J @ qdot
 
@@ -292,7 +292,7 @@ class JacobianAnalyzer:
     def _compare_dls(self, J, target_twist):
         target_twist = self._normalize(target_twist)
 
-        # Moore-Penrose 伪逆：奇异值小时会产生很大的关节速度。
+        # Moore-Penrose 伪逆:奇异值小时会产生很大的关节速度。
         qdot_pinv = np.linalg.pinv(J) @ target_twist
 
         # Damped Least Squares:
@@ -419,7 +419,7 @@ class JacobianHud:
         y = self._put_vector(canvas, "qdot", qdot, x1, y, precision=2, chunk_size=4)
         y += 12
 
-        # 6D Jacobian 用于完整末端 twist 映射：
+        # 6D Jacobian 用于完整末端 twist 映射:
         # [vx, vy, vz, wx, wy, wz]^T = J(q) qdot
         self._put(canvas, "6D Jacobian J [linear; angular]", x1, y, color=(210, 230, 255))
         y += 26
@@ -529,8 +529,8 @@ class JacobianHud:
 
     @staticmethod
     def _metric_color(value):
-        # 简单用颜色标出接近奇异的程度：
-        # 红色：最小奇异值很小；黄色：需要注意；绿色：相对健康。
+        # 简单用颜色标出接近奇异的程度:
+        # 红色:最小奇异值很小；黄色:需要注意；绿色:相对健康。
         if value < 0.02:
             return (80, 80, 255)
         if value < 0.06:
@@ -545,7 +545,7 @@ class JacobianHud:
 
     @staticmethod
     def _draw_ellipsoid_xy(canvas, ellipsoid: ManipulabilityEllipsoid, origin):
-        # 位置可操作椭球是 3D 的。HUD 里画 XY 投影：
+        # 位置可操作椭球是 3D 的。HUD 里画 XY 投影:
         #   covariance = U diag(sigma^2) U^T
         # 取 covariance 的 XY 子块，再做一次 2D 特征分解，就能得到
         # 屏幕上的椭圆长短轴和旋转角。
@@ -582,7 +582,7 @@ class JacobianHud:
 class JacobianSingularityDemo(ArmBaseViewer):
     """雅可比与奇异点可视化 Demo 主类。
 
-    这个类只负责连接 MuJoCo 仿真循环：
+    这个类只负责连接 MuJoCo 仿真循环:
     1. 给机械臂一个关节目标；
     2. 读取当前 q / qdot；
     3. 调 JacobianAnalyzer 计算指标；
@@ -625,7 +625,7 @@ class JacobianSingularityDemo(ArmBaseViewer):
     def runFunc(self):
         self._apply_joint_motion()
 
-        # MuJoCo 当前状态：q 是关节角，qdot 是关节速度。
+        # MuJoCo 当前状态:q 是关节角，qdot 是关节速度。
         # 用真实仿真速度而不是目标速度，可以看到位置执行器动态带来的影响。
         q = self.data.qpos[:7].copy()
         qdot = self.data.qvel[:7].copy()
@@ -638,7 +638,7 @@ class JacobianSingularityDemo(ArmBaseViewer):
         self._print_periodic_status(metrics)
 
     def _apply_joint_motion(self):
-        # 位置执行器控制：写入前 7 个 ctrl，对应 joint1_pos 到 joint7_pos。
+        # 位置执行器控制:写入前 7 个 ctrl，对应 joint1_pos 到 joint7_pos。
         q_target = self.motion.next_target()
         self.data.ctrl[:7] = q_target
 
