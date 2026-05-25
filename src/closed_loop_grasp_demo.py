@@ -7,7 +7,7 @@ import mujoco
 import numpy as np
 
 from mujoco_viewer import ArmBaseViewer
-from utils import euler2rotmat, format_vec
+from utils import euler2quat, euler2rotmat, format_vec, quat2euler
 from xml_paths import PANDA_POS_SCENE_XML
 
 
@@ -33,6 +33,8 @@ class GraspConfig:
     workspace_x: tuple = (0.38, 0.55)
     workspace_y: tuple = (-0.16, 0.16)
     cube_center_z: float = 0.025
+    randomize_cube_yaw: bool = True
+    cube_yaw_range: tuple = (-np.pi, np.pi)
 
     # PandaKinematics.ik() targets link7. With the fixed downward grasp
     # orientation, ee_center_body sits about 0.212 m below link7.
@@ -60,6 +62,11 @@ class GraspConfig:
     grasp_roll: float = np.pi
     grasp_pitch: float = 0.0
     grasp_yaw: float = 0.0
+    # The Panda hand is mounted with a -45 deg yaw relative to link7, while the
+    # finger opening direction is the hand Y axis. This offset makes that axis
+    # align with the box yaw instead of the box diagonal.
+    grasp_yaw_offset: float = -np.pi / 4.0
+    use_gripper_pi_symmetry: bool = True
 
 
 @dataclass
@@ -88,6 +95,8 @@ class GraspTargets:
     pre_grasp_link7_pos: np.ndarray
     grasp_link7_pos: np.ndarray
     lift_link7_pos: np.ndarray
+    cube_yaw: float
+    grasp_yaw: float
 
 
 @dataclass
@@ -186,14 +195,30 @@ class BoxGraspScene:
             ],
             dtype=np.float64,
         )
+        if self.config.randomize_cube_yaw:
+            yaw = float(rng.uniform(*self.config.cube_yaw_range))
+        else:
+            yaw = self.box_yaw()
+
         self.data.qpos[self.box_qpos_adr : self.box_qpos_adr + 3] = pos
-        self.data.qpos[self.box_qpos_adr + 3 : self.box_qpos_adr + 7] = [1, 0, 0, 0]
+        self.data.qpos[self.box_qpos_adr + 3 : self.box_qpos_adr + 7] = euler2quat(
+            0.0,
+            0.0,
+            yaw,
+        )
         mujoco.mj_forward(self.model, self.data)
         self.initial_box_pos = self.box_pos()
         return self.initial_box_pos.copy()
 
     def box_pos(self) -> np.ndarray:
         return self.data.xpos[self.box_body_id].copy()
+
+    def box_quat(self) -> np.ndarray:
+        return self.data.xquat[self.box_body_id].copy()
+
+    def box_yaw(self) -> float:
+        _, _, yaw = quat2euler(self.box_quat())
+        return float(yaw)
 
     def ee_pos(self) -> np.ndarray:
         return self.data.xpos[self.ee_body_id].copy()
@@ -242,25 +267,27 @@ class TopDownGraspPlanner:
     def __init__(self, kinematics, config: GraspConfig):
         self.kinematics = kinematics
         self.config = config
-        self.grasp_rot = euler2rotmat(
-            config.grasp_roll,
-            config.grasp_pitch,
-            config.grasp_yaw,
-        )
 
-    def plan(self, q_seed, cube_pos) -> Optional[GraspTargets]:
+    def plan(self, q_seed, cube_pos, cube_yaw: float) -> Optional[GraspTargets]:
         q_seed = np.asarray(q_seed, dtype=np.float64).copy()
         pre_pos = self._link7_target(cube_pos, self.config.pre_grasp_ee_z_offset)
         grasp_pos = self._link7_target(cube_pos, self.config.grasp_ee_z_offset)
         lift_pos = self._link7_target(cube_pos, self.config.lift_ee_z_offset)
+        grasp_yaw = self._grasp_yaw_from_box(cube_yaw)
+        grasp_rot = euler2rotmat(
+            self.config.grasp_roll,
+            self.config.grasp_pitch,
+            grasp_yaw,
+        )
 
-        success, pre_q = self.kinematics.ik(q_seed, self.grasp_rot, pre_pos)
+        success, pre_q = self.kinematics.ik(q_seed, grasp_rot, pre_pos)
         if not success:
             return None
 
         descend_path = self._plan_vertical_path(
             np.asarray(pre_q),
             cube_pos,
+            grasp_rot,
             self.config.pre_grasp_ee_z_offset,
             self.config.grasp_ee_z_offset,
             self.config.descend_path_steps,
@@ -272,6 +299,7 @@ class TopDownGraspPlanner:
         lift_path = self._plan_vertical_path(
             grasp_q,
             cube_pos,
+            grasp_rot,
             self.config.grasp_ee_z_offset,
             self.config.lift_ee_z_offset,
             self.config.lift_path_steps,
@@ -289,6 +317,8 @@ class TopDownGraspPlanner:
             pre_grasp_link7_pos=pre_pos,
             grasp_link7_pos=grasp_pos,
             lift_link7_pos=lift_pos,
+            cube_yaw=float(cube_yaw),
+            grasp_yaw=float(grasp_yaw),
         )
 
     def _link7_target(self, cube_pos, ee_z_offset):
@@ -297,17 +327,30 @@ class TopDownGraspPlanner:
             dtype=np.float64,
         )
 
-    def _plan_vertical_path(self, q_seed, cube_pos, start_ee_z_offset, end_ee_z_offset, steps):
+    def _plan_vertical_path(self, q_seed, cube_pos, grasp_rot, start_ee_z_offset, end_ee_z_offset, steps):
         path = []
         q_current = np.asarray(q_seed, dtype=np.float64).copy()
         for ee_z_offset in np.linspace(start_ee_z_offset, end_ee_z_offset, steps):
             target_pos = self._link7_target(cube_pos, ee_z_offset)
-            success, q_next = self.kinematics.ik(q_current, self.grasp_rot, target_pos)
+            success, q_next = self.kinematics.ik(q_current, grasp_rot, target_pos)
             if not success:
                 return None
             q_current = np.asarray(q_next, dtype=np.float64)
             path.append(q_current.copy())
         return path
+
+    def _grasp_yaw_from_box(self, cube_yaw: float) -> float:
+        yaw = float(cube_yaw) + self.config.grasp_yaw_offset
+        if not self.config.use_gripper_pi_symmetry:
+            return self._wrap_to_pi(yaw)
+
+        reference = self.config.grasp_yaw
+        delta = (yaw - reference + np.pi / 2.0) % np.pi - np.pi / 2.0
+        return reference + delta
+
+    @staticmethod
+    def _wrap_to_pi(angle: float) -> float:
+        return (angle + np.pi) % (2.0 * np.pi) - np.pi
 
 
 class ClosedLoopGraspDemo(ArmBaseViewer):
@@ -327,6 +370,7 @@ class ClosedLoopGraspDemo(ArmBaseViewer):
         self.episode_steps = 0
         self.last_failure_reason = ""
         self.cube_pos = np.zeros(3, dtype=np.float64)
+        self.cube_yaw = 0.0
         self.targets: Optional[GraspTargets] = None
         self.path_index = 0
 
@@ -374,18 +418,30 @@ class ClosedLoopGraspDemo(ArmBaseViewer):
         mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
         self.controller.set_gripper(GRIPPER_OPEN)
         self.cube_pos = self.scene.randomize_box(self.rng)
+        self.cube_yaw = self.scene.box_yaw()
         self.targets = None
         self.episode_steps = 0
-        print(f"\n[Reset] cube_pos={format_vec(self.cube_pos)}")
+        print(
+            f"\n[Reset] cube_pos={format_vec(self.cube_pos)} "
+            f"cube_yaw={np.rad2deg(self.cube_yaw):.1f}deg"
+        )
         self._transition(GraspState.PLAN)
 
     def _step_plan(self):
-        self.targets = self.planner.plan(self.data.qpos[:7].copy(), self.cube_pos)
+        self.targets = self.planner.plan(
+            self.data.qpos[:7].copy(),
+            self.cube_pos,
+            self.cube_yaw,
+        )
         if self.targets is None:
             self._fail("ik_fail")
             return
 
         print("[Plan] targets ready")
+        print(
+            f"  cube_yaw={np.rad2deg(self.targets.cube_yaw):.1f}deg "
+            f"grasp_yaw={np.rad2deg(self.targets.grasp_yaw):.1f}deg"
+        )
         print(f"  pre_link7={format_vec(self.targets.pre_grasp_link7_pos)}")
         print(f"  grasp_link7={format_vec(self.targets.grasp_link7_pos)}")
         print(f"  lift_link7={format_vec(self.targets.lift_link7_pos)}")
